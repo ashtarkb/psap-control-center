@@ -1,3 +1,4 @@
+import { useState, useEffect, useCallback } from 'react'
 import { Routes, Route, Navigate, Link } from 'react-router-dom'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
@@ -7,6 +8,8 @@ import Reservations from './pages/Reservations'
 import Calendar from './pages/Calendar'
 import Testing from './pages/Testing'
 import Results from './pages/Results'
+import LoginPage from './pages/LoginPage'
+import { isAuthenticated } from './stores/authStore'
 
 function NotFound() {
   return (
@@ -21,6 +24,18 @@ function NotFound() {
 }
 
 function App() {
+  const [authed, setAuthed] = useState(isAuthenticated())
+  const syncAuth = useCallback(() => setAuthed(isAuthenticated()), [])
+
+  useEffect(() => {
+    window.addEventListener('auth-change', syncAuth)
+    return () => window.removeEventListener('auth-change', syncAuth)
+  }, [syncAuth])
+
+  if (!authed) {
+    return <LoginPage />
+  }
+
   return (
     <Routes>
       <Route path="/" element={<Layout />}>

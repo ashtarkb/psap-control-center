@@ -7,9 +7,27 @@ PSAP Control Center is a full-stack cluster management and reservation platform 
 It provides:
 
 - A **cluster registry** with live health, topology, and workload visibility
-- A **reservation system** for scheduling cluster access with conflict detection
+- A **reservation system** with full-cluster and partial GPU reservations, type-aware conflict detection, and namespace-level enforcement
+- **Dynamic Resource Allocation (DRA)** integration for GPU inventory and allocation tracking
 - **Hearth integration** for GPU discovery via FournosCluster CRDs
 - A **view-only public mode** and **admin-authenticated write mode**
+
+---
+
+## Hearth vs Control Center — Responsibility Boundary
+
+| Concern | **Hearth** | **PSAP Control Center** |
+|---|---|---|
+| GPU cluster discovery | Manages `FournosCluster` CRDs on a central management cluster | Reads CRDs via `/api/v1/hearth/clusters` for parallel GPU inventory (clusters must still be added to Control Center manually) |
+| Cluster lifecycle | Provisions and decommissions bare-metal/cloud GPU nodes | No lifecycle control — read-only consumer of cluster metadata |
+| Hardware inventory | Source of truth for node count, GPU model, driver version | Caches the data locally; refreshes on demand or periodic poll |
+| Reservation / scheduling | No concept of reservations | Full ownership: conflict detection, calendar, enforcement |
+| Namespace enforcement | N/A | Creates/deletes enforcement namespaces, ResourceQuotas, and ResourceClaimTemplates on managed clusters |
+| DRA / GPU allocation | May install DRA drivers as part of provisioning | Reads DRA ResourceSlices/Claims to compute live allocation |
+| Authentication | Owns the Hearth API token | Stores the token; uses it for Hearth API calls |
+
+> **Rule of thumb**: Hearth tells Control Center *what exists*; Control Center
+> decides *who can use it and when*.
 
 ---
 
@@ -103,10 +121,11 @@ backend/app/
 │   ├── reservation.py       # Reservation DTOs with validation
 │   └── hearth.py            # Hearth/FournosCluster DTOs
 ├── services/
-│   ├── cluster_service.py   # Cluster CRUD, status refresh
-│   ├── reservation_service.py  # Reservations, conflicts, calendar
-│   ├── kubernetes_service.py   # K8s/OCP API wrapper (~980 lines)
-│   └── hearth_service.py    # FournosCluster CRD reader
+│   ├── cluster_service.py      # Cluster CRUD, status refresh
+│   ├── reservation_service.py  # Reservations, type-aware conflicts, calendar
+│   ├── enforcement_service.py  # Namespace lifecycle, ResourceQuota, DRA templates
+│   ├── kubernetes_service.py   # K8s/OCP API wrapper (DRA, GPU allocation, namespace mgmt)
+│   └── hearth_service.py       # FournosCluster CRD reader
 ├── api/
 │   ├── __init__.py          # Router aggregation
 │   ├── health.py            # GET /health
@@ -122,7 +141,7 @@ backend/app/
 
 All endpoints live under `/api/v1`. OpenAPI docs available at `/docs`.
 
-**Authentication model**: GET endpoints are public (view-only). POST, PUT, DELETE endpoints require HTTP Basic Auth.
+**Authentication model**: GET endpoints are public (view-only). Most POST, PUT, DELETE endpoints require HTTP Basic Auth (exception: `POST /clusters/{id}/refresh` is public).
 
 #### Cluster Endpoints (`/api/v1/clusters`)
 
@@ -139,6 +158,7 @@ All endpoints live under `/api/v1`. OpenAPI docs available at `/docs`.
 | POST   | `/{id}/login`                | Yes  | Login with OCP credentials           |
 | POST   | `/{id}/reauthenticate`       | Yes  | Re-auth expired token                |
 | GET    | `/{id}/topology`             | No   | Node topology with GPU details       |
+| GET    | `/{id}/gpu-status`           | No   | Live GPU allocation (DRA + legacy)   |
 | GET    | `/{id}/ocp-details`          | No   | OpenShift CRs (version, infra, network) |
 | GET    | `/{id}/operators`            | No   | Installed OLM operators              |
 | GET    | `/{id}/workloads`            | No   | Pods and deployments                 |
@@ -152,7 +172,7 @@ All endpoints live under `/api/v1`. OpenAPI docs available at `/docs`.
 | GET    | `/`                          | No   | List reservations (filterable)       |
 | POST   | `/`                          | Yes  | Create reservation (conflict-checked)|
 | GET    | `/calendar`                  | No   | Calendar events for date range       |
-| GET    | `/cluster/{id}/current`      | No   | Current occupant of a cluster        |
+| GET    | `/cluster/{id}/current`      | No   | Current occupants of a cluster (multi-occupant) |
 | GET    | `/{id}`                      | No   | Get reservation detail               |
 | PUT    | `/{id}`                      | Yes  | Update reservation                   |
 | DELETE | `/{id}`                      | Yes  | Delete reservation                   |
@@ -182,6 +202,8 @@ All endpoints live under `/api/v1`. OpenAPI docs available at `/docs`.
 │ status        VARCHAR(50)       │
 │ node_count    VARCHAR(50)       │
 │ gpu_count     VARCHAR(50)       │
+│ gpu_type      VARCHAR(255)     │  ← dominant GPU product name
+│ gpu_allocation_mode VARCHAR(20) │  ← "dra" or "legacy"
 │ cluster_version VARCHAR(50)     │
 │ color         VARCHAR(7)        │
 │ tags          JSON              │
@@ -206,6 +228,10 @@ All endpoints live under `/api/v1`. OpenAPI docs available at `/docs`.
 │ team          VARCHAR(255)      │
 │ start_time    DATETIME          │
 │ end_time      DATETIME          │
+│ reservation_type VARCHAR(20)   │  ← "cluster" or "gpu"
+│ gpu_count     INTEGER           │  ← number of GPUs (when type=gpu)
+│ enforcement_namespace VARCHAR(255) │ ← K8s namespace name
+│ enforcement_status VARCHAR(50) │  ← null/provisioned/error/cleaned
 │ purpose       VARCHAR(255)      │
 │ notes         TEXT              │
 │ color         VARCHAR(7)        │  ← inherited from cluster
@@ -215,11 +241,49 @@ All endpoints live under `/api/v1`. OpenAPI docs available at `/docs`.
 └─────────────────────────────────┘
 ```
 
-**Cascade behavior on cluster delete**: `cluster_id` is set to NULL, `cluster_name` is preserved, and any scheduled/active reservations are cancelled with an auto-generated note.
+**Cascade behavior on cluster delete**: Enforcement namespaces are cleaned up first, then `cluster_id` is set to NULL, `cluster_name` is preserved, and any scheduled/active reservations are cancelled with an auto-generated note.
 
-**Background task**: Every 60 seconds, the backend transitions reservation statuses:
-- `scheduled → active` when `start_time` has passed
-- `scheduled/active → completed` when `end_time` has passed
+**Background task**: Every 30 seconds, the backend:
+1. Transitions reservation statuses:
+   - `scheduled → active` when `start_time` has passed
+   - `scheduled/active → completed` when `end_time` has passed
+2. Runs the enforcement reconciler:
+   - Provisions namespaces + ResourceQuotas for newly active GPU reservations
+   - Retries errored provisions
+   - Cleans up namespaces for completed/cancelled reservations
+
+### GPU Allocation & DRA
+
+The `KubernetesService.get_gpu_allocation()` method probes GPU availability using a dual-mode strategy:
+
+1. **DRA mode** (preferred): Queries `resource.k8s.io` API for `ResourceSlice` objects (GPU capacity) and `ResourceClaim` objects (allocations). Supports `v1`, `v1beta2`, `v1beta1`.
+2. **Legacy mode** (fallback): Counts `nvidia.com/gpu` from node capacity and sums pod resource requests for allocated count.
+
+Both modes support a `gpu-fleet-viewer-config` ConfigMap for vendor abstraction (customizable GPU resource name, product label, memory label, driver version label).
+
+### Namespace Enforcement
+
+When a GPU reservation becomes active:
+
+```text
+Reservation ACTIVE (type=gpu)
+        │
+        ▼
+Create namespace: psap-res-{reservation_id[:8]}
+        │
+        ├── Labels: managed-by, reservation-id, user
+        │
+        ▼
+Apply ResourceQuota: requests.nvidia.com/gpu = {gpu_count}
+        │
+        ▼
+(If DRA available) Create ResourceClaimTemplate with DeviceClass
+        │
+        ▼
+Set enforcement_status = "provisioned"
+```
+
+On completion/cancellation, the namespace is deleted (cascading all resources within it).
 
 ### Cluster Connectivity
 
@@ -286,6 +350,7 @@ frontend/src/
 ├── hooks/
 │   ├── useClusters.ts       # Cluster queries + mutations
 │   ├── useReservations.ts   # Reservation queries + mutations
+│   ├── useGpuStatus.ts      # Live GPU allocation query (per-cluster)
 │   └── useHearth.ts         # Hearth queries + mutations
 ├── services/
 │   └── api.ts               # Axios instance + API functions
@@ -337,7 +402,7 @@ Credentials persist for the browser session only (sessionStorage). Closing the t
 All data fetching uses TanStack Query with automatic caching, refetching, and cache invalidation on mutations:
 
 - **Cluster status**: polls every 60 seconds
-- **Current cluster user**: polls every 30 seconds
+- **Cluster occupancy**: polls every 30 seconds
 - **Topology/OCP/operators**: 60-second stale time
 - **Workloads**: 30-second stale time
 
@@ -495,7 +560,9 @@ docker-compose -f docker-compose.dev.yml up  # Dev with hot reload
 
 ## Future / Planned
 
+- **Per-user RBAC**: Fine-grained access control for namespaces and reservations
 - **Testing page**: Automated test execution (TOPSAIL, vLLM benchmarks, MLPerf)
 - **Results page**: MLFlow integration for test results visualization
 - **User model**: Per-user accounts with JWT auth (model and deps exist but are not wired up)
 - **PostgreSQL**: Supported by the codebase for multi-replica production deployments
+- **Alembic migrations**: Currently using manual ALTER TABLE; planned migration to Alembic for production

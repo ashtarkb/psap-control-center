@@ -24,11 +24,39 @@ class ClusterUpdate(BaseModel):
     is_active: Optional[bool] = None
 
 
+class GpuTypeInfo(BaseModel):
+    product: str
+    count: int
+    allocated: int
+    free: int
+    node_count: int
+
+
+class GpuPodInfo(BaseModel):
+    name: str
+    namespace: str
+    gpu_count: int
+    node: Optional[str] = None
+
+
+class GpuAllocationStatus(BaseModel):
+    gpu_allocation_mode: str = "legacy"
+    dra_available: bool = False
+    dra_api_version: Optional[str] = None
+    total_gpus: int = 0
+    allocated_gpus: int = 0
+    free_gpus: int = 0
+    gpu_types: List[GpuTypeInfo] = []
+    gpu_pods: List[GpuPodInfo] = []
+
+
 class ClusterStatus(BaseModel):
     status: str
     api_server_url: Optional[str] = None
     node_count: Optional[str] = None
     gpu_count: Optional[str] = None
+    gpu_type: Optional[str] = None
+    gpu_allocation_mode: Optional[str] = None
     cluster_version: Optional[str] = None
     last_health_check: Optional[datetime] = None
     nodes: Optional[List[Dict[str, Any]]] = None
@@ -44,6 +72,8 @@ class ClusterResponse(ClusterBase):
     last_health_check: Optional[datetime] = None
     node_count: Optional[str] = None
     gpu_count: Optional[str] = None
+    gpu_type: Optional[str] = None
+    gpu_allocation_mode: Optional[str] = None
     cluster_version: Optional[str] = None
     metadata_info: Optional[Dict[str, Any]] = None
     is_active: bool

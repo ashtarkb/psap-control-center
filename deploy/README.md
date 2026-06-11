@@ -1,22 +1,32 @@
 # Deploying PSAP Control Center on OpenShift
 
-This guide deploys the PSAP Control Center on an OpenShift (OCP) cluster.
+This guide deploys the PSAP Control Center on an OpenShift (OCP) cluster
+using container images hosted on [Quay.io](https://quay.io).
 
 ## Prerequisites
 
 - `oc` CLI installed
-- Credentials for the target cluster
-- The internal image registry must be enabled (`Managed` state)
+- `podman` installed (for building and pushing images)
+- Node.js and `npm` installed (for building frontend static assets)
+- Credentials for the target OpenShift cluster
+- A Quay.io account with push access to your organization
 
-## Target Cluster
+## Image Registry
 
-- **Console**: `https://console-openshift-console.apps.psap-automation.ibm.rhperfscale.org`
-- **API**: `https://api.psap-automation.ibm.rhperfscale.org:6443`
-- **App URL**: `https://control-center.apps.psap-automation.ibm.rhperfscale.org`
+Create two repositories under your Quay.io organization:
+
+| Image | Repository |
+| ----- | ---------- |
+| Backend  | `quay.io/<your-org>/psap-control-center-backend` |
+| Frontend | `quay.io/<your-org>/psap-control-center-frontend` |
+
+Set both to **public** so the cluster can pull without an image pull secret.
+If you prefer private repos, create a pull secret on the cluster and link it
+to the `default` service account in the project namespace.
 
 ## Naming Convention
 
-All resources use the `psap-control-center-*` prefix:
+All OpenShift resources use the `psap-control-center-*` prefix:
 
 | Resource    | Name                                |
 | ----------- | ----------------------------------- |
@@ -25,8 +35,6 @@ All resources use the `psap-control-center-*` prefix:
 |             | `psap-control-center-config`        |
 | PVCs        | `psap-control-center-data`          |
 |             | `psap-control-center-kubeconfigs`   |
-| Builds      | `psap-control-center-backend`       |
-|             | `psap-control-center-frontend`      |
 | Deployments | `psap-control-center-backend`       |
 |             | `psap-control-center-frontend`      |
 | Services    | `psap-control-center-backend`       |
@@ -38,18 +46,49 @@ All resources use the `psap-control-center-*` prefix:
 ### 1. Log in to the cluster
 
 ```bash
-oc login https://api.psap-automation.ibm.rhperfscale.org:6443 \
-  --username=<user> --password=<pass>
+oc login <cluster-api-url> --username=<user> --password=<pass>
 ```
 
-### 2. Verify the internal image registry is enabled
+### 2. Build and push images to Quay.io
+
+Set your Quay organization (used throughout the remaining steps):
 
 ```bash
-oc get configs.imageregistry.operator.openshift.io/cluster \
-  -o jsonpath='{.spec.managementState}'
+export QUAY_ORG=<your-org>
 ```
 
-Expected output: `Managed`
+Log in to Quay.io:
+
+```bash
+podman login quay.io
+```
+
+Build both images for linux/amd64 and push:
+
+```bash
+# Backend
+podman build --platform linux/amd64 \
+  -t quay.io/${QUAY_ORG}/psap-control-center-backend:latest ./backend
+podman push quay.io/${QUAY_ORG}/psap-control-center-backend:latest
+
+# Frontend — build static assets locally, then package into the Nginx image
+cd frontend && npm ci && npm run build && cd ..
+podman build --platform linux/amd64 \
+  -t quay.io/${QUAY_ORG}/psap-control-center-frontend:latest \
+  -f - ./frontend <<'DOCKERFILE'
+FROM nginxinc/nginx-unprivileged:alpine
+COPY dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 8080
+CMD ["nginx", "-g", "daemon off;"]
+DOCKERFILE
+podman push quay.io/${QUAY_ORG}/psap-control-center-frontend:latest
+```
+
+> **Note:** The frontend is built locally (not inside the container) to avoid
+> QEMU emulation issues when cross-compiling Node.js on Apple Silicon. If you
+> are building on an x86_64 host, you can omit `--platform linux/amd64` and
+> use the standard multi-stage `frontend/Dockerfile` directly.
 
 ### 3. Create the namespace
 
@@ -76,34 +115,14 @@ oc create secret generic psap-control-center-config \
 oc apply -f deploy/pvcs.yaml
 ```
 
-### 6. Build images on-cluster
+Edit `deploy/pvcs.yaml` before applying if your cluster uses a non-default
+storage class (e.g. `ocs-storagecluster-cephfs`).
 
-Before building the frontend, update `frontend/nginx.conf` so the proxy
-points to the OCP service name:
-
-```nginx
-proxy_pass http://psap-control-center-backend:8000;
-```
-
-Then build both images:
-
-```bash
-# Backend
-oc new-build --name=psap-control-center-backend --binary --strategy=docker
-oc start-build psap-control-center-backend --from-dir=./backend --follow
-
-# Frontend
-oc new-build --name=psap-control-center-frontend --binary --strategy=docker
-oc start-build psap-control-center-frontend --from-dir=./frontend --follow
-```
-
-Images are pushed to the internal registry automatically.
-
-### 7. Deploy the backend
+### 6. Deploy the backend
 
 ```bash
 oc create deployment psap-control-center-backend \
-  --image=image-registry.openshift-image-registry.svc:5000/psap-control-center/psap-control-center-backend:latest
+  --image=quay.io/${QUAY_ORG}/psap-control-center-backend:latest
 
 oc set env deployment/psap-control-center-backend \
   --from=secret/psap-control-center-admin
@@ -122,55 +141,71 @@ oc set volume deployment/psap-control-center-backend \
 oc expose deployment psap-control-center-backend --port=8000
 ```
 
-### 8. Deploy the frontend
+### 7. Deploy the frontend
 
 ```bash
 oc create deployment psap-control-center-frontend \
-  --image=image-registry.openshift-image-registry.svc:5000/psap-control-center/psap-control-center-frontend:latest
+  --image=quay.io/${QUAY_ORG}/psap-control-center-frontend:latest
 
-oc expose deployment psap-control-center-frontend --port=80
+oc expose deployment psap-control-center-frontend --port=8080
 ```
 
-### 9. Create the route
+### 8. Create the route
+
+```bash
+APPS_DOMAIN=$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}' 2>/dev/null)
+
+oc create route edge psap-control-center \
+  --service=psap-control-center-frontend \
+  --hostname=control-center.${APPS_DOMAIN}
+```
+
+If you lack permissions for `ingresses.config`, find the apps domain from
+an existing route or from the cluster console URL and substitute manually:
 
 ```bash
 oc create route edge psap-control-center \
   --service=psap-control-center-frontend \
-  --hostname=control-center.apps.psap-automation.ibm.rhperfscale.org
+  --hostname=control-center.<apps-domain>
 ```
 
-### 10. Verify
+### 9. Verify
 
 ```bash
-# Check pods are running
 oc get pods
-
-# Check the route
 oc get route psap-control-center
-
-# Test the backend health endpoint
-curl -k https://control-center.apps.psap-automation.ibm.rhperfscale.org/api/v1/health
+curl -k https://control-center.<apps-domain>/api/v1/health
 ```
-
-The app should be accessible at:
-`https://control-center.apps.psap-automation.ibm.rhperfscale.org`
 
 ## Rebuilding After Code Changes
 
 ```bash
-# Rebuild backend
-oc start-build psap-control-center-backend --from-dir=./backend --follow
+# Backend
+podman build --platform linux/amd64 \
+  -t quay.io/${QUAY_ORG}/psap-control-center-backend:latest ./backend
+podman push quay.io/${QUAY_ORG}/psap-control-center-backend:latest
+oc rollout restart deployment/psap-control-center-backend
 
-# Rebuild frontend
-oc start-build psap-control-center-frontend --from-dir=./frontend --follow
-
-# Pods will restart automatically with the new images
+# Frontend
+cd frontend && npm run build && cd ..
+podman build --platform linux/amd64 \
+  -t quay.io/${QUAY_ORG}/psap-control-center-frontend:latest \
+  -f - ./frontend <<'DOCKERFILE'
+FROM nginxinc/nginx-unprivileged:alpine
+COPY dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 8080
+CMD ["nginx", "-g", "daemon off;"]
+DOCKERFILE
+podman push quay.io/${QUAY_ORG}/psap-control-center-frontend:latest
+oc rollout restart deployment/psap-control-center-frontend
 ```
 
 ## Authentication
 
 - **Viewing** (all GET endpoints): No authentication required
-- **Modifying** (create, edit, delete): Requires sign-in with the admin credentials stored in the `psap-control-center-admin` secret
+- **Modifying** (create, edit, delete): Requires sign-in with the admin
+  credentials stored in the `psap-control-center-admin` secret
 
 ## Updating the Admin Password
 
@@ -180,7 +215,6 @@ oc create secret generic psap-control-center-admin \
   --from-literal=ADMIN_USERNAME=admin \
   --from-literal=ADMIN_PASSWORD='<new-password>'
 
-# Restart the backend to pick up the change
 oc rollout restart deployment/psap-control-center-backend
 ```
 

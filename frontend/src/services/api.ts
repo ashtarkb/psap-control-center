@@ -7,9 +7,11 @@ import type {
   OcpDetails,
   Operator,
   WorkloadsResponse,
+  GpuAllocationStatus,
   Reservation, 
   ReservationListResponse,
   CalendarEvent,
+  ClusterOccupancyResponse,
   HearthCluster,
   HearthClusterListResponse,
   HearthStatus,
@@ -142,6 +144,39 @@ export const clusterApi = {
     const { data } = await api.get(`/clusters/${id}/workloads`, { params: { namespace } })
     return data
   },
+
+  getGpuStatus: async (id: string): Promise<GpuAllocationStatus> => {
+    const { data } = await api.get(`/clusters/${id}/gpu-status`)
+    return data
+  },
+
+  getGpuPodHistory: async (id: string, limit = 25): Promise<{
+    pods: Array<{
+      name: string
+      namespace: string
+      gpu_count: number
+      node?: string
+      first_seen: string
+      last_seen: string
+      finished_at: string
+    }>
+    total: number
+  }> => {
+    const { data } = await api.get(`/clusters/${id}/gpu-pod-history`, { params: { limit } })
+    return data
+  },
+
+  getRefreshSchedule: async (): Promise<{
+    server_time: string
+    last_refresh: string | null
+    next_refresh: string | null
+    in_progress: boolean
+    total: number
+    completed: number
+  }> => {
+    const { data } = await api.get('/clusters/refresh-schedule')
+    return data
+  },
 }
 
 export const reservationApi = {
@@ -187,7 +222,7 @@ export const reservationApi = {
     return data
   },
 
-  getCurrentUser: async (clusterId: string): Promise<{ occupied: boolean; current_user?: { user_name: string; team?: string; title: string; start_time: string; end_time: string } }> => {
+  getCurrentReservations: async (clusterId: string): Promise<ClusterOccupancyResponse> => {
     const { data } = await api.get(`/reservations/cluster/${clusterId}/current`)
     return data
   },

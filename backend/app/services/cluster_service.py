@@ -139,70 +139,100 @@ class ClusterService:
 
     async def delete_cluster(self, cluster_id: str) -> bool:
         from app.models.reservation import Reservation, ReservationStatus
-        
+        from app.services.enforcement_service import ReservationEnforcementService
+
         cluster = await self.get_cluster(cluster_id)
         if not cluster:
             return False
-        
-        # Store kubeconfig path before deletion
+
         kubeconfig_path = cluster.kubeconfig_path
-        
-        # Update all reservations: preserve cluster name and cancel active/scheduled ones
+
+        # Clean up enforcement namespaces before losing the cluster
+        try:
+            enforcement = ReservationEnforcementService(self.db)
+            cleaned = await enforcement.cleanup_cluster_enforcement(cluster_id)
+            if cleaned:
+                logger.info(
+                    f"Cleaned {cleaned} enforcement namespaces "
+                    f"for cluster {cluster.name}"
+                )
+        except Exception as e:
+            logger.error(
+                f"Enforcement cleanup failed during "
+                f"cluster deletion: {e}"
+            )
+            await self.db.rollback()
+            raise RuntimeError(
+                "Failed to clean enforcement namespaces; "
+                "aborting cluster deletion"
+            ) from e
+
         result = await self.db.execute(
             select(Reservation).where(Reservation.cluster_id == cluster_id)
         )
         reservations = result.scalars().all()
-        
+
         for reservation in reservations:
-            # Preserve the cluster name for historical records
             reservation.cluster_name = cluster.name
             reservation.cluster_id = None
-            
-            # Cancel any scheduled or active reservations
+
             if reservation.status in [ReservationStatus.SCHEDULED, ReservationStatus.ACTIVE]:
                 reservation.status = ReservationStatus.CANCELLED
                 reservation.notes = (reservation.notes or "") + f"\n[Auto-cancelled: Cluster '{cluster.name}' was removed from Control Center]"
-        
+
         await self.db.delete(cluster)
         await self.db.commit()
-        
-        # Delete kubeconfig file if it exists
+
         if kubeconfig_path and os.path.exists(kubeconfig_path):
             try:
                 os.remove(kubeconfig_path)
-                logger.info("Deleted kubeconfig file:", kubeconfig_path)
+                logger.info(f"Deleted kubeconfig file: {kubeconfig_path}")
             except OSError as e:
-                logger.warn("Failed to delete kubeconfig file:", kubeconfig_path, e)
-        
+                logger.warning(f"Failed to delete kubeconfig file: {kubeconfig_path}: {e}")
+
         return True
 
     async def refresh_cluster_status(self, cluster_id: str) -> Optional[ClusterStatus]:
         cluster = await self.get_cluster(cluster_id)
         if not cluster or not cluster.kubeconfig_path:
             return None
-        
+
         try:
             k8s_service = KubernetesService(cluster.kubeconfig_path)
             cluster_info = k8s_service.get_cluster_info()
-            
+
             cluster.status = cluster_info.get("status", "unknown")
             cluster.node_count = cluster_info.get("node_count")
-            cluster.gpu_count = cluster_info.get("gpu_count")
             cluster.cluster_version = cluster_info.get("cluster_version")
             cluster.api_server_url = cluster_info.get("api_server") or cluster.api_server_url
             cluster.last_health_check = datetime.utcnow()
-            
+
+            try:
+                gpu_alloc = k8s_service.get_gpu_allocation()
+                cluster.gpu_allocation_mode = gpu_alloc.gpu_allocation_mode
+                cluster.gpu_count = gpu_alloc.total_gpus
+                cluster.gpu_type = (
+                    gpu_alloc.gpu_types[0].product
+                    if gpu_alloc.gpu_types else None
+                )
+            except Exception as e:
+                logger.warning(f"GPU allocation probe failed: {e}")
+                cluster.gpu_count = cluster_info.get("gpu_count")
+                cluster.gpu_type = cluster_info.get("gpu_type")
+
             await self.db.commit()
             await self.db.refresh(cluster)
-            
+
             namespaces = k8s_service.get_namespaces()
             resource_usage = k8s_service.get_resource_usage()
-            
+
             return ClusterStatus(
                 status=cluster.status,
                 api_server_url=cluster.api_server_url,
                 node_count=cluster.node_count,
                 gpu_count=cluster.gpu_count,
+                gpu_type=cluster.gpu_type,
+                gpu_allocation_mode=cluster.gpu_allocation_mode,
                 cluster_version=cluster.cluster_version,
                 last_health_check=cluster.last_health_check,
                 nodes=cluster_info.get("nodes"),
@@ -214,7 +244,7 @@ class ClusterService:
             cluster.status = "error"
             cluster.last_health_check = datetime.utcnow()
             await self.db.commit()
-            
+
             return ClusterStatus(
                 status="error",
                 last_health_check=cluster.last_health_check
@@ -224,12 +254,14 @@ class ClusterService:
         cluster = await self.get_cluster(cluster_id)
         if not cluster:
             return None
-        
+
         return ClusterStatus(
             status=cluster.status,
             api_server_url=cluster.api_server_url,
             node_count=cluster.node_count,
             gpu_count=cluster.gpu_count,
+            gpu_type=cluster.gpu_type,
+            gpu_allocation_mode=cluster.gpu_allocation_mode,
             cluster_version=cluster.cluster_version,
             last_health_check=cluster.last_health_check
         )

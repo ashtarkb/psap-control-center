@@ -1,4 +1,4 @@
-import { useState, Fragment } from 'react'
+import { useState, useEffect, useRef, useCallback, Fragment } from 'react'
 import { Link } from 'react-router-dom'
 import { Dialog, Transition, Tab } from '@headlessui/react'
 import {
@@ -10,14 +10,40 @@ import {
   CloudArrowUpIcon,
   KeyIcon,
   EyeSlashIcon,
+  CheckCircleIcon,
+  ExclamationTriangleIcon,
+  ClockIcon,
 } from '@heroicons/react/24/outline'
 import { useDropzone } from 'react-dropzone'
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useClusters, useCreateCluster, useDeleteCluster } from '../hooks/useClusters'
+import { clusterApi } from '../services/api'
 import { format } from 'date-fns'
 import toast from 'react-hot-toast'
 import clsx from 'clsx'
+import type { GpuAllocationStatus } from '../types'
+import GpuDonutChart from '../components/GpuDonutChart'
+
+function timeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime()
+  const mins = Math.floor(diff / 60_000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  if (days === 1) return '1 day ago'
+  return `${days} days ago`
+}
 
 type AuthMethod = 'kubeconfig' | 'credentials'
+
+interface RefreshProgress {
+  total: number
+  completed: number
+  currentCluster: string
+  errors: string[]
+}
 
 export default function Clusters() {
   const [isAddOpen, setIsAddOpen] = useState(false)
@@ -32,12 +58,132 @@ export default function Clusters() {
     password: '',
   })
   const [kubeconfigFile, setKubeconfigFile] = useState<File | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshProgress, setRefreshProgress] = useState<RefreshProgress | null>(null)
+  const [countdown, setCountdown] = useState('')
+  const prevLastRefresh = useRef<string | null>(null)
 
+  const queryClient = useQueryClient()
   const { data, isLoading, refetch } = useClusters()
   const createCluster = useCreateCluster()
   const deleteCluster = useDeleteCluster()
 
+  const { data: schedule } = useQuery({
+    queryKey: ['cluster-refresh-schedule'],
+    queryFn: clusterApi.getRefreshSchedule,
+    refetchInterval: 10_000,
+  })
+
+  // Auto-refresh cluster data when the server completes a new refresh cycle
+  useEffect(() => {
+    if (!schedule?.last_refresh) return
+    if (prevLastRefresh.current && prevLastRefresh.current !== schedule.last_refresh) {
+      refetch()
+      queryClient.invalidateQueries({ queryKey: ['gpu-status'] })
+    }
+    prevLastRefresh.current = schedule.last_refresh
+  }, [schedule?.last_refresh, refetch, queryClient])
+
+  // Tick the countdown every second
+  useEffect(() => {
+    if (!schedule?.next_refresh) { setCountdown(''); return }
+
+    const tick = () => {
+      const diff = Math.max(0, Math.floor((new Date(schedule.next_refresh!).getTime() - Date.now()) / 1000))
+      const m = Math.floor(diff / 60)
+      const s = diff % 60
+      setCountdown(`${m}:${s.toString().padStart(2, '0')}`)
+    }
+
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [schedule?.next_refresh])
+
+  const serverRefreshing = schedule?.in_progress ?? false
+
+  const handleRefreshAll = useCallback(async () => {
+    const clusterList = data?.clusters || []
+    if (clusterList.length === 0 || refreshing) return
+
+    if (serverRefreshing) {
+      toast('Server refresh already in progress — please wait', { icon: '⏳' })
+      return
+    }
+
+    setRefreshing(true)
+    const errors: string[] = []
+    let completed = 0
+    setRefreshProgress({ total: clusterList.length, completed: 0, currentCluster: '', errors: [] })
+
+    const refreshOne = async (cluster: typeof clusterList[0]) => {
+      try {
+        await clusterApi.refreshStatus(cluster.id)
+      } catch {
+        errors.push(cluster.name)
+      }
+
+      refetch()
+
+      try {
+        await queryClient.fetchQuery({
+          queryKey: ['gpu-status', cluster.id],
+          queryFn: () => clusterApi.getGpuStatus(cluster.id),
+          staleTime: 0,
+        })
+      } catch {
+        // GPU status fetch is best-effort
+      }
+
+      completed++
+      setRefreshProgress(prev => prev ? { ...prev, completed, errors: [...errors] } : prev)
+    }
+
+    await Promise.all(clusterList.map(refreshOne))
+
+    setRefreshProgress({ total: clusterList.length, completed: clusterList.length, currentCluster: '', errors })
+
+    if (errors.length === 0) {
+      toast.success(`All ${clusterList.length} clusters refreshed`)
+    } else {
+      toast.error(`${errors.length} cluster(s) failed to refresh`)
+    }
+
+    setTimeout(() => {
+      setRefreshing(false)
+      setRefreshProgress(null)
+    }, 2000)
+  }, [data, refreshing, serverRefreshing, refetch, queryClient])
+
   const clusters = data?.clusters || []
+
+  const gpuStatusQueries = useQueries({
+    queries: clusters.map((c) => ({
+      queryKey: ['gpu-status', c.id],
+      queryFn: () => clusterApi.getGpuStatus(c.id),
+      enabled: c.status === 'healthy',
+      staleTime: 30_000,
+      refetchInterval: 60_000,
+    })),
+  })
+  const gpuStatusByCluster = clusters.reduce<Record<string, GpuAllocationStatus | undefined>>((acc, c, i) => {
+    acc[c.id] = gpuStatusQueries[i]?.data as GpuAllocationStatus | undefined
+    return acc
+  }, {})
+
+  const gpuHistoryQueries = useQueries({
+    queries: clusters.map((c) => ({
+      queryKey: ['gpu-pod-history', c.id],
+      queryFn: () => clusterApi.getGpuPodHistory(c.id),
+      enabled: c.status === 'healthy',
+      staleTime: 60_000,
+      refetchInterval: 120_000,
+    })),
+  })
+  const gpuHistoryByCluster = clusters.reduce<Record<string, Array<{ name: string; namespace: string; gpu_count: number; node?: string; finished_at: string }>>>((acc, c, i) => {
+    acc[c.id] = (gpuHistoryQueries[i]?.data as { pods: typeof acc[string] } | undefined)?.pods || []
+    return acc
+  }, {})
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     accept: { 'application/x-yaml': ['.yaml', '.yml'], 'text/plain': ['.kubeconfig'] },
@@ -123,14 +269,36 @@ export default function Clusters() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Clusters</h1>
-          <p className="mt-1 text-sm text-gray-500">
-            Manage your OCP clusters and their kubeconfigs
-          </p>
+          <div className="mt-1 flex items-center gap-4 text-sm text-gray-500">
+            <span>Manage your OCP clusters and their kubeconfigs</span>
+            {schedule && (
+              <span className="flex items-center gap-3 text-xs text-gray-400 border-l border-gray-200 pl-4">
+                <ClockIcon className="h-3.5 w-3.5 flex-shrink-0" />
+                {schedule.last_refresh ? (
+                  <span>Updated {format(new Date(schedule.last_refresh), 'MMM d, HH:mm:ss')}</span>
+                ) : (
+                  <span>No refresh yet</span>
+                )}
+                {schedule.in_progress ? (
+                  <span className="flex items-center gap-1 text-primary-600 font-medium">
+                    <ArrowPathIcon className="h-3 w-3 animate-spin" />
+                    Refreshing...
+                  </span>
+                ) : countdown ? (
+                  <span>Next in <span className="font-mono font-medium text-gray-600">{countdown}</span></span>
+                ) : null}
+              </span>
+            )}
+          </div>
         </div>
         <div className="flex gap-3">
-          <button onClick={() => refetch()} className="btn-secondary">
-            <ArrowPathIcon className="h-4 w-4 mr-2" />
-            Refresh
+          <button
+            onClick={handleRefreshAll}
+            disabled={refreshing || serverRefreshing}
+            className="btn-secondary disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <ArrowPathIcon className={clsx('h-4 w-4 mr-2', (refreshing || serverRefreshing) && 'animate-spin')} />
+            {refreshing ? 'Refreshing...' : serverRefreshing ? 'Auto-refreshing...' : 'Refresh'}
           </button>
           <button onClick={() => setIsAddOpen(true)} className="btn-primary">
             <PlusIcon className="h-4 w-4 mr-2" />
@@ -138,6 +306,73 @@ export default function Clusters() {
           </button>
         </div>
       </div>
+
+      {serverRefreshing && !refreshProgress && schedule && schedule.total > 0 && (
+        <div className="card p-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2 text-sm font-medium text-gray-700">
+              <ArrowPathIcon className="h-4 w-4 animate-spin text-primary-600" />
+              <span>
+                Auto-refreshing clusters... {schedule.completed} of {schedule.total} complete
+              </span>
+            </div>
+            <span className="text-xs text-gray-500">
+              {schedule.completed} / {schedule.total}
+            </span>
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+            <div
+              className="h-2 rounded-full transition-all duration-500 bg-primary-500"
+              style={{ width: `${schedule.total > 0 ? (schedule.completed / schedule.total) * 100 : 0}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {refreshProgress && (
+        <div className="card p-4">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2 text-sm font-medium text-gray-700">
+              {refreshProgress.completed < refreshProgress.total ? (
+                <>
+                  <ArrowPathIcon className="h-4 w-4 animate-spin text-primary-600" />
+                  <span>
+                    Refreshing clusters... {refreshProgress.completed} of {refreshProgress.total} complete
+                  </span>
+                </>
+              ) : refreshProgress.errors.length === 0 ? (
+                <>
+                  <CheckCircleIcon className="h-4 w-4 text-green-600" />
+                  <span className="text-green-700">All clusters refreshed successfully</span>
+                </>
+              ) : (
+                <>
+                  <ExclamationTriangleIcon className="h-4 w-4 text-amber-600" />
+                  <span className="text-amber-700">
+                    Refreshed with {refreshProgress.errors.length} error(s): {refreshProgress.errors.join(', ')}
+                  </span>
+                </>
+              )}
+            </div>
+            <span className="text-xs text-gray-500">
+              {refreshProgress.completed} / {refreshProgress.total}
+            </span>
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
+            <div
+              className={clsx(
+                'h-2 rounded-full transition-all duration-300',
+                refreshProgress.completed < refreshProgress.total
+                  ? 'bg-primary-500'
+                  : refreshProgress.errors.length === 0
+                  ? 'bg-green-500'
+                  : 'bg-amber-500'
+              )}
+              style={{ width: `${(refreshProgress.completed / refreshProgress.total) * 100}%` }}
+            />
+          </div>
+        </div>
+      )}
 
       {isLoading ? (
         <div className="card p-12 text-center">
@@ -203,39 +438,99 @@ export default function Clusters() {
                   <p className="mt-4 text-sm text-gray-500 line-clamp-2">{cluster.description}</p>
                 )}
 
-                <div className="mt-4 grid grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <p className="text-gray-500">Nodes</p>
-                    <p className="font-semibold text-gray-900">{cluster.node_count || 'N/A'}</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-500">GPUs</p>
-                    <p className="font-semibold text-gray-900">{cluster.gpu_count || '0'}</p>
-                  </div>
-                  <div>
-                    <p className="text-gray-500">Version</p>
-                    <p className="font-semibold text-gray-900 truncate">
-                      {cluster.cluster_version || 'N/A'}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-gray-500">Last Check</p>
-                    <p className="font-semibold text-gray-900">
-                      {cluster.last_health_check
-                        ? format(new Date(cluster.last_health_check), 'MMM d, HH:mm')
-                        : 'Never'}
-                    </p>
-                  </div>
-                </div>
+                {(() => {
+                  const gpuData = gpuStatusByCluster[cluster.id]
+                  const cTotal = gpuData?.total_gpus ?? parseInt(cluster.gpu_count || '0')
+                  const cUsed = gpuData?.allocated_gpus ?? 0
+                  return (
+                    <div className="mt-4 flex items-center gap-4">
+                      {cTotal > 0 && (
+                        <GpuDonutChart used={cUsed} total={cTotal} size={72} strokeWidth={7} />
+                      )}
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm flex-1">
+                        <div>
+                          <p className="text-gray-500">Nodes</p>
+                          <p className="font-semibold text-gray-900">{cluster.node_count || 'N/A'}</p>
+                        </div>
+                        <div>
+                          <p className="text-gray-500">GPUs</p>
+                          <p className="font-semibold text-gray-900">
+                            {gpuData ? `${cUsed} / ${cTotal}` : `– / ${cTotal}`}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-gray-500">Version</p>
+                          <p className="font-semibold text-gray-900 truncate">
+                            {cluster.cluster_version || 'N/A'}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-gray-500">Last Check</p>
+                          <p className="font-semibold text-gray-900">
+                            {cluster.last_health_check
+                              ? format(new Date(cluster.last_health_check), 'MMM d, HH:mm')
+                              : 'Never'}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })()}
 
-                {cluster.api_server_url && (
-                  <div className="mt-4 pt-4 border-t border-gray-100">
-                    <p className="text-xs text-gray-500">API Server</p>
-                    <p className="text-sm text-gray-700 font-mono truncate">
-                      {cluster.api_server_url}
-                    </p>
-                  </div>
-                )}
+                {(() => {
+                  const pods = gpuStatusByCluster[cluster.id]?.gpu_pods || []
+                  if (pods.length === 0) return null
+                  return (
+                    <div className="mt-4 pt-4 border-t border-gray-100">
+                      <p className="text-xs font-medium text-gray-500 mb-2">
+                        GPU Workloads ({pods.length})
+                      </p>
+                      <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                        {pods.map((pod) => (
+                          <div key={`${pod.namespace}/${pod.name}`} className="flex items-center justify-between text-xs">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="inline-block h-1.5 w-1.5 rounded-full bg-purple-500 flex-shrink-0" />
+                              <span className="text-gray-500 flex-shrink-0">{pod.namespace}/</span>
+                              <span className="text-gray-800 font-medium truncate">{pod.name}</span>
+                            </div>
+                            <span className="ml-2 flex-shrink-0 inline-flex items-center px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 font-medium">
+                              {pod.gpu_count} GPU
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })()}
+
+                {(() => {
+                  const history = gpuHistoryByCluster[cluster.id] || []
+                  if (history.length === 0) return null
+                  return (
+                    <div className="mt-3 pt-3 border-t border-gray-100/60">
+                      <p className="text-xs font-medium text-gray-400 mb-1.5">
+                        Past GPU Workloads ({history.length})
+                      </p>
+                      <div className="space-y-1 max-h-28 overflow-y-auto">
+                        {history.map((pod) => (
+                          <div key={`${pod.namespace}/${pod.name}`} className="flex items-center justify-between text-xs">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="inline-block h-1.5 w-1.5 rounded-full bg-gray-300 flex-shrink-0" />
+                              <span className="text-gray-400 flex-shrink-0">{pod.namespace}/</span>
+                              <span className="text-gray-500 truncate">{pod.name}</span>
+                            </div>
+                            <div className="ml-2 flex-shrink-0 flex items-center gap-1.5">
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">
+                                {pod.gpu_count} GPU
+                              </span>
+                              <span className="text-gray-400 whitespace-nowrap">{timeAgo(pod.finished_at)}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })()}
               </div>
 
               <div className="px-6 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between">

@@ -72,6 +72,8 @@ class Logger:
             )
             print(output, file=sys.stderr, flush=True)
 
+    warning = warn
+
     def info(self, message: str, *args):
         if _current_level >= LogLevel.INFO:
             output = _format_message(self.context, LogLevel.INFO, message, args)

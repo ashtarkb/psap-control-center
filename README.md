@@ -7,8 +7,10 @@ A cluster management and reservation platform for the Performance and Scale for 
 ## Features
 
 - **Cluster Registry** — Add clusters via kubeconfig upload or kubeadmin credentials. Live health monitoring, node topology visualization, OCP details, operators, and workloads.
-- **Reservation System** — Schedule cluster access with conflict detection. Color-coded reservations, cancellation tracking, and historical preservation when clusters are removed.
-- **Calendar Views** — Weekly preview with overlapping reservation display, plus full month/week/day calendar.
+- **Reservation System** — Full-cluster or partial GPU reservations with type-aware conflict detection. Color-coded calendar, cancellation tracking, and historical preservation when clusters are removed.
+- **GPU Allocation & DRA** — Live GPU status via DRA (`resource.k8s.io`) with automatic fallback to legacy node capacity counting. Per-GPU-type breakdowns, ConfigMap-driven vendor abstraction.
+- **Namespace Enforcement** — GPU reservations automatically provision isolated Kubernetes namespaces with `ResourceQuota` and optional DRA `ResourceClaimTemplate`. Namespaces are cleaned up on completion, cancellation, or deletion.
+- **Calendar Views** — Weekly preview with overlapping reservation display (index-based opacity for distinguishing coexisting reservations), plus full month/week/day calendar.
 - **Hearth Integration** — Connect to a Hearth management cluster to discover GPU inventory via FournosCluster CRDs.
 - **View-Only Public Access** — Anyone can browse clusters, reservations, and status. Modifications require sign-in.
 - **Structured Logging** — Consistent log format across backend and frontend, configurable via `LOG_LEVEL`.
@@ -104,9 +106,13 @@ Key endpoints:
 | `/api/v1/clusters` | GET | No | List clusters |
 | `/api/v1/clusters` | POST | Yes | Add a cluster |
 | `/api/v1/clusters/{id}/topology` | GET | No | Node topology |
+| `/api/v1/clusters/{id}/gpu-status` | GET | No | Live GPU allocation (DRA/legacy) |
 | `/api/v1/reservations` | GET | No | List reservations |
-| `/api/v1/reservations` | POST | Yes | Create reservation |
+| `/api/v1/reservations` | POST | Yes | Create reservation (full-cluster or GPU) |
+| `/api/v1/reservations/{id}` | PUT | Yes | Update reservation |
+| `/api/v1/reservations/{id}/cancel` | POST | Yes | Cancel reservation |
 | `/api/v1/reservations/calendar` | GET | No | Calendar events |
+| `/api/v1/reservations/cluster/{id}/current` | GET | No | Multi-occupant cluster occupancy |
 | `/api/v1/hearth/clusters` | GET | No | Hearth GPU inventory |
 | `/api/v1/auth/check` | GET | Yes | Verify credentials |
 

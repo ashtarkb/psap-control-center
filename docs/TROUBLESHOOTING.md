@@ -11,13 +11,13 @@
 - Is the API server URL correct? Check the cluster detail page.
 - Is the kubeconfig still valid? Tokens may have expired.
 
-**Fix**: On the cluster detail page, try **Reauthenticate** with fresh kubeadmin credentials. This creates a new service account token.
+**Fix**: On the cluster detail page, click **Upload Kubeconfig** to upload a fresh kubeconfig file. If the cluster was added via credentials, you can also re-add it with fresh kubeadmin credentials.
 
 ### Cluster shows "error" after adding via credentials
 
 **Cause**: The OAuth token obtained during login may have expired before the service account was fully created.
 
-**Fix**: Click **Reauthenticate** on the cluster detail page with the same kubeadmin credentials. The system will create a new long-lived service account token.
+**Fix**: On the cluster detail page, click **Upload Kubeconfig** to provide a new kubeconfig with a valid token, or remove and re-add the cluster with fresh kubeadmin credentials.
 
 ### "Invalid kubeconfig" error when uploading
 
@@ -123,26 +123,63 @@ If you changed the service name, rebuild the frontend so nginx picks up the new 
 
 ## Reservation Issues
 
-### "Time slot conflicts with..." error
+### Reservation conflict errors
 
-**Cause**: Another reservation overlaps with your requested time on the same cluster.
+Conflict error messages vary by type:
+- **Full-cluster**: `"Full-cluster reservation conflicts with '<title>' by <user> ..."`
+- **GPU vs full-cluster**: `"Conflicts with full-cluster reservation '<title>' by <user> ..."`
+- **GPU capacity exceeded**: `"Not enough GPUs: requesting N, M already reserved, cluster has T total"`
 
-**Fix**: Choose a different time slot or a different cluster. The error message shows the conflicting reservation's title, user, and time range.
+**Fix**: Choose a different time slot, a different cluster, or reduce the GPU count. The error message shows the conflicting reservation details.
+
+### "Not enough GPUs" error when creating a GPU reservation
+
+**Cause**: The sum of all active/scheduled GPU reservations on the cluster plus your request exceeds the cluster's GPU capacity.
+
+**Fix**: Request fewer GPUs, or wait for existing GPU reservations to complete. Check the GPU availability panel in the reservation form to see current allocation.
+
+### GPU reservation created but no namespace appears
+
+**Cause**: Enforcement namespaces are provisioned only for **GPU reservations** (not full-cluster). If the reservation's start time is already past, the namespace is created immediately at booking. Otherwise, the background reconciler provisions it when the reservation transitions to "active" (within ~30 seconds of the start time).
+
+**Fix**: If the reservation is still "scheduled", wait for the start time. If it is active but no namespace appears, check the backend logs for enforcement errors:
+```bash
+oc logs deployment/psap-control-center-backend | grep "EnforcementService"
+```
+
+### Enforcement namespace shows "error" status
+
+**Cause**: The system failed to create the namespace, ResourceQuota, or ResourceClaimTemplate on the target cluster. The `enforcement_status` is visible in the UI as a badge next to the namespace name in the reservation details (and via the API).
+
+**Fix**: Check connectivity to the cluster. The reconciler will retry errored provisions on each cycle (every 30 seconds). Common causes:
+- Cluster is unreachable
+- Kubeconfig token has expired
+- Insufficient RBAC permissions on the cluster
+- The `gpu-fleet-viewer-config` ConfigMap is missing in the `gpu-fleet-viewer` namespace (affects ResourceQuota resource name selection)
+
+### GPU allocation shows 0 even though the cluster has GPUs
+
+**Cause**: The GPU allocation endpoint tries DRA (Dynamic Resource Allocation) first, then falls back to legacy node capacity counting.
+
+**Check**:
+- Verify the cluster has NVIDIA GPU nodes: `oc get nodes -l nvidia.com/gpu.product`
+- If using DRA, verify ResourceSlice objects exist: `oc get resourceslices`
+- Check if the `nvidia.com/gpu` resource is reported in node capacity
 
 ### Reservation still shows "scheduled" after start time
 
-**Cause**: The background status updater runs every 60 seconds. There may be a brief delay.
+**Cause**: The background status updater runs every 30 seconds. There may be a brief delay.
 
-**Fix**: Wait up to 60 seconds and refresh the page. If it still doesn't update, check that the backend is running:
+**Fix**: Wait up to 30 seconds and refresh the page. If it still doesn't update, check that the backend is running:
 ```bash
 oc logs deployment/psap-control-center-backend | tail -20
 ```
 
 ### Reservations disappeared after cluster was deleted
 
-**Cause**: When a cluster is removed, its active/scheduled reservations are cancelled and the `cluster_id` link is removed. However, reservations are preserved with the cluster name for historical records.
+**Cause**: When a cluster is removed, its active/scheduled reservations are cancelled and the `cluster_id` link is removed. However, reservations are preserved with the cluster name for historical records. Any enforcement namespaces are cleaned up before deletion.
 
-**Find them**: Filter reservations by the "cancelled" status. They'll have a note like "[Auto-cancelled: Cluster 'name' was removed from Control Center]".
+**Find them**: Check the "Past" reservations list on the Reservations page. Cancelled reservations from cluster deletion will have a note like "[Auto-cancelled: Cluster 'name' was removed from Control Center]". You can also query the API directly with `?status=cancelled`.
 
 ## Hearth Issues
 

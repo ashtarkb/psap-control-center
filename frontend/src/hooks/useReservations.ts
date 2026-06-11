@@ -37,8 +37,8 @@ export function useCalendarEvents(startDate: string, endDate: string, clusterId?
 
 export function useCurrentClusterUser(clusterId: string) {
   return useQuery({
-    queryKey: ['currentUser', clusterId],
-    queryFn: () => reservationApi.getCurrentUser(clusterId),
+    queryKey: ['clusterOccupancy', clusterId],
+    queryFn: () => reservationApi.getCurrentReservations(clusterId),
     enabled: !!clusterId,
     refetchInterval: 30000,
   })
@@ -54,7 +54,8 @@ export function useCreateReservation() {
       queryClient.invalidateQueries({ queryKey: ['reservations'] })
       queryClient.invalidateQueries({ queryKey: ['calendarEvents'] })
       if (data.cluster_id) {
-        queryClient.invalidateQueries({ queryKey: ['currentUser', data.cluster_id] })
+        queryClient.invalidateQueries({ queryKey: ['clusterOccupancy', data.cluster_id] })
+        queryClient.invalidateQueries({ queryKey: ['gpu-status', data.cluster_id] })
       }
       toast.success('Reservation created successfully')
     },
@@ -76,7 +77,8 @@ export function useUpdateReservation() {
       queryClient.invalidateQueries({ queryKey: ['calendarEvents'] })
       queryClient.invalidateQueries({ queryKey: ['reservation', data.id] })
       if (data.cluster_id) {
-        queryClient.invalidateQueries({ queryKey: ['currentUser', data.cluster_id] })
+        queryClient.invalidateQueries({ queryKey: ['clusterOccupancy', data.cluster_id] })
+        queryClient.invalidateQueries({ queryKey: ['gpu-status', data.cluster_id] })
       }
       toast.success('Reservation updated successfully')
     },
@@ -94,7 +96,8 @@ export function useDeleteReservation() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['reservations'] })
       queryClient.invalidateQueries({ queryKey: ['calendarEvents'] })
-      queryClient.invalidateQueries({ queryKey: ['currentUser'] })
+      queryClient.invalidateQueries({ queryKey: ['clusterOccupancy'] })
+      queryClient.invalidateQueries({ queryKey: ['gpu-status'] })
       toast.success('Reservation deleted successfully')
     },
     onError: (error: Error) => {
@@ -114,7 +117,8 @@ export function useCancelReservation() {
       queryClient.invalidateQueries({ queryKey: ['calendarEvents'] })
       queryClient.invalidateQueries({ queryKey: ['reservation', data.id] })
       if (data.cluster_id) {
-        queryClient.invalidateQueries({ queryKey: ['currentUser', data.cluster_id] })
+        queryClient.invalidateQueries({ queryKey: ['clusterOccupancy', data.cluster_id] })
+        queryClient.invalidateQueries({ queryKey: ['gpu-status', data.cluster_id] })
       }
       toast.success('Reservation cancelled')
     },

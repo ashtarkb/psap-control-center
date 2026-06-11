@@ -32,6 +32,7 @@ import {
 } from '../hooks/useClusters'
 import { useCurrentClusterUser } from '../hooks/useReservations'
 import { useHearthCluster } from '../hooks/useHearth'
+import { useGpuStatus } from '../hooks/useGpuStatus'
 import { format } from 'date-fns'
 import clsx from 'clsx'
 import type { TopologyNode, PodInfo } from '../types'
@@ -488,7 +489,8 @@ export default function ClusterDetail() {
 
   const { data: cluster, isLoading: clusterLoading } = useCluster(id!)
   useClusterStatus(id!)
-  const { data: currentUser } = useCurrentClusterUser(id!)
+  const { data: occupancy } = useCurrentClusterUser(id!)
+  const { data: gpuStatus } = useGpuStatus(id, !!cluster)
   // Hearth integration: try to find a matching FournosCluster by name
   const clusterName = cluster?.name || ''
   const { data: hearthCluster } = useHearthCluster(clusterName)
@@ -742,30 +744,100 @@ export default function ClusterDetail() {
         </div>
       )}
 
-      {currentUser?.occupied && currentUser.current_user && (
+      {/* GPU Allocation Card */}
+      {gpuStatus && gpuStatus.total_gpus > 0 && (
+        <div className="card p-6">
+          <h3 className="font-semibold text-gray-900 mb-3">GPU Allocation</h3>
+          <div className="grid grid-cols-3 gap-4 text-sm mb-3">
+            <div className="text-center p-3 bg-gray-50 rounded-lg">
+              <p className="text-2xl font-bold text-gray-900">{gpuStatus.total_gpus}</p>
+              <p className="text-xs text-gray-500">Total GPUs</p>
+            </div>
+            <div className="text-center p-3 bg-orange-50 rounded-lg">
+              <p className="text-2xl font-bold text-orange-600">{gpuStatus.allocated_gpus}</p>
+              <p className="text-xs text-gray-500">Allocated</p>
+            </div>
+            <div className="text-center p-3 bg-green-50 rounded-lg">
+              <p className="text-2xl font-bold text-green-600">{gpuStatus.free_gpus}</p>
+              <p className="text-xs text-gray-500">Free</p>
+            </div>
+          </div>
+          {gpuStatus.gpu_types.length > 0 && (
+            <div className="space-y-2">
+              {gpuStatus.gpu_types.map((t, i) => (
+                <div key={i} className="flex items-center justify-between text-sm p-2 bg-gray-50 rounded">
+                  <span className="font-medium text-gray-700">{t.product}</span>
+                  <div className="flex items-center gap-3 text-xs">
+                    <span className="text-gray-500">{t.node_count} node{t.node_count !== 1 ? 's' : ''}</span>
+                    <span className="text-green-600 font-medium">{t.free}/{t.count} free</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {gpuStatus.dra_available && (
+            <div className="mt-2 text-xs text-gray-500">
+              DRA {gpuStatus.dra_api_version} &middot; {gpuStatus.gpu_allocation_mode} mode
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Current Reservations (multi-occupant) */}
+      {occupancy?.occupied && occupancy.reservations.length > 0 && (
         <div className="card p-6 border-l-4 border-l-orange-500">
-          <h3 className="font-semibold text-gray-900">Currently Reserved</h3>
-          <div className="mt-2 grid grid-cols-2 gap-4 text-sm">
-            <div>
-              <p className="text-gray-500">User</p>
-              <p className="font-medium text-gray-900">{currentUser.current_user.user_name}</p>
-            </div>
-            <div>
-              <p className="text-gray-500">Purpose</p>
-              <p className="font-medium text-gray-900">{currentUser.current_user.title}</p>
-            </div>
-            <div>
-              <p className="text-gray-500">Started</p>
-              <p className="font-medium text-gray-900">
-                {format(new Date(currentUser.current_user.start_time), 'MMM d, h:mm a')}
-              </p>
-            </div>
-            <div>
-              <p className="text-gray-500">Ends</p>
-              <p className="font-medium text-gray-900">
-                {format(new Date(currentUser.current_user.end_time), 'MMM d, h:mm a')}
-              </p>
-            </div>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold text-gray-900">
+              Currently Reserved ({occupancy.reservations.length} active)
+            </h3>
+            {occupancy.gpu_summary && occupancy.gpu_summary.total_reserved_gpus > 0 && (
+              <span className="text-xs bg-purple-100 text-purple-800 px-2 py-1 rounded-full font-medium">
+                {occupancy.gpu_summary.total_reserved_gpus} GPU reserved
+              </span>
+            )}
+          </div>
+          <div className="space-y-3">
+            {occupancy.reservations.map((r, idx) => (
+              <div key={idx} className="p-3 bg-gray-50 rounded-lg">
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <p className="text-gray-500">User</p>
+                    <p className="font-medium text-gray-900">{r.user_name}</p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Purpose</p>
+                    <p className="font-medium text-gray-900">{r.title}</p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Type</p>
+                    <p className="font-medium text-gray-900">
+                      {r.reservation_type === 'gpu' ? `${r.gpu_count ?? '?'} GPU` : 'Full Cluster'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-gray-500">Ends</p>
+                    <p className="font-medium text-gray-900">
+                      {format(new Date(r.end_time), 'MMM d, h:mm a')}
+                    </p>
+                  </div>
+                </div>
+                {r.enforcement_namespace && (
+                  <div className="mt-2 p-2 bg-blue-50 rounded flex items-center gap-2 text-xs">
+                    <span className="text-blue-700">Namespace: </span>
+                    <code className="font-mono text-blue-900">{r.enforcement_namespace}</code>
+                    {r.enforcement_status && (
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                        r.enforcement_status === 'provisioned' ? 'bg-green-100 text-green-800' :
+                        r.enforcement_status === 'error' ? 'bg-red-100 text-red-800' :
+                        'bg-gray-100 text-gray-600'
+                      }`}>
+                        {r.enforcement_status}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       )}

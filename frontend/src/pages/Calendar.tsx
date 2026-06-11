@@ -36,13 +36,16 @@ export default function Calendar() {
 
   const calendarEvents = useMemo(() => {
     if (!events) return []
-    return events.map((event) => ({
-      id: event.id,
-      title: `${event.title} (${event.cluster_name})`,
-      start: new Date(event.start),
-      end: new Date(event.end),
-      resource: event,
-    }))
+    return events.map((event) => {
+      const title = `${event.title} (${event.cluster_name})`
+      return {
+        id: event.id,
+        title,
+        start: new Date(event.start),
+        end: new Date(event.end),
+        resource: event,
+      }
+    })
   }, [events])
 
   const eventStyleGetter = useCallback((event: { resource: { color: string; status: string } }) => {

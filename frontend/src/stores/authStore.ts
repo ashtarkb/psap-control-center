@@ -11,9 +11,9 @@ export interface AuthCredentials {
 
 let credentials: AuthCredentials | null = null
 
-function loadFromSession(): AuthCredentials | null {
+function loadFromStorage(): AuthCredentials | null {
   try {
-    const stored = sessionStorage.getItem(STORAGE_KEY)
+    const stored = localStorage.getItem(STORAGE_KEY)
     if (stored) return JSON.parse(stored)
   } catch {
     // ignore parse errors
@@ -21,7 +21,16 @@ function loadFromSession(): AuthCredentials | null {
   return null
 }
 
-credentials = loadFromSession()
+credentials = loadFromStorage()
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (event) => {
+    if (event.key === STORAGE_KEY) {
+      credentials = loadFromStorage()
+      window.dispatchEvent(new Event('auth-change'))
+    }
+  })
+}
 
 export function getCredentials(): AuthCredentials | null {
   return credentials
@@ -38,14 +47,14 @@ export function getBasicAuthHeader(): string | null {
 
 export function setCredentials(creds: AuthCredentials): void {
   credentials = creds
-  sessionStorage.setItem(STORAGE_KEY, JSON.stringify(creds))
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(creds))
   logger.info('User authenticated:', creds.username)
   window.dispatchEvent(new Event('auth-change'))
 }
 
 export function clearCredentials(): void {
   credentials = null
-  sessionStorage.removeItem(STORAGE_KEY)
+  localStorage.removeItem(STORAGE_KEY)
   logger.info('User logged out')
   window.dispatchEvent(new Event('auth-change'))
 }

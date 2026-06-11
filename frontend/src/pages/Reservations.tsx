@@ -23,8 +23,10 @@ import {
   useCancelReservation,
 } from '../hooks/useReservations'
 import { useClusters } from '../hooks/useClusters'
+import { useGpuStatus } from '../hooks/useGpuStatus'
 import toast from 'react-hot-toast'
 import clsx from 'clsx'
+import type { ReservationType } from '../types'
 
 const initialFormState = {
   cluster_id: '',
@@ -36,9 +38,24 @@ const initialFormState = {
   start_time: '',
   end_time: '',
   purpose: '',
+  reservation_type: 'cluster' as ReservationType,
+  gpu_count: '' as string,
+  enforce_isolation: false,
 }
 
-function WeekCalendar({ reservations }: { reservations: Array<{ start_time: string; end_time: string; color: string; title: string; status: string; user_name: string; cluster_name?: string }> }) {
+interface WeekCalendarReservation {
+  start_time: string
+  end_time: string
+  color: string
+  title: string
+  status: string
+  user_name: string
+  cluster_name?: string
+  reservation_type?: string
+  gpu_count?: number | null
+}
+
+function WeekCalendar({ reservations }: { reservations: WeekCalendarReservation[] }) {
   const [currentWeekStart, setCurrentWeekStart] = useState(startOfWeek(new Date()))
   
   // Get all days in the week
@@ -64,7 +81,7 @@ function WeekCalendar({ reservations }: { reservations: Array<{ start_time: stri
   }
   
   // Check if this is the first hour of a reservation on this day
-  const isReservationStart = (date: Date, hour: number, reservation: any) => {
+  const isReservationStart = (date: Date, hour: number, reservation: WeekCalendarReservation) => {
     const start = new Date(reservation.start_time)
     const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0)
     
@@ -177,18 +194,22 @@ function WeekCalendar({ reservations }: { reservations: Array<{ start_time: stri
                           <div className="absolute inset-0 flex">
                             {slotReservations.map((res, idx) => {
                               const showLabel = isReservationStart(date, hour, res)
+                              const opacityHex = ['40', '60', '80', 'A0', 'C0'][idx % 5]
+                              const color = res.color || '#3B82F6'
                               return (
                                 <div
                                   key={idx}
                                   className="flex-1 flex items-center justify-center overflow-hidden border-r border-white/50 last:border-r-0"
-                                  style={{ backgroundColor: `${res.color}40` }}
+                                  style={{ backgroundColor: `${color}${opacityHex}` }}
                                 >
                                   {showLabel && slotReservations.length <= 2 && (
                                     <span 
                                       className="text-[8px] font-bold truncate px-0.5"
-                                      style={{ color: res.color }}
+                                      style={{ color }}
                                     >
-                                      {res.cluster_name?.substring(0, 8) || res.title.substring(0, 6)}
+                                      {res.reservation_type === 'gpu'
+                                        ? `${res.gpu_count ?? '?'}GPU`
+                                        : (res.cluster_name?.substring(0, 8) || res.title.substring(0, 6))}
                                     </span>
                                   )}
                                 </div>
@@ -203,12 +224,12 @@ function WeekCalendar({ reservations }: { reservations: Array<{ start_time: stri
                           // Single reservation
                           <div 
                             className="absolute inset-0 flex items-center px-1"
-                            style={{ backgroundColor: `${slotReservations[0].color}30` }}
+                            style={{ backgroundColor: `${slotReservations[0].color || '#3B82F6'}30` }}
                           >
                             {isReservationStart(date, hour, slotReservations[0]) && (
                               <span 
                                 className="text-[10px] font-medium truncate"
-                                style={{ color: slotReservations[0].color }}
+                                style={{ color: slotReservations[0].color || '#3B82F6' }}
                               >
                                 {slotReservations[0].title}
                               </span>
@@ -242,7 +263,7 @@ function WeekCalendar({ reservations }: { reservations: Array<{ start_time: stri
             <div className="w-3 h-3 bg-gradient-to-r from-blue-200 to-purple-200 rounded relative">
               <span className="absolute -top-0.5 -right-0.5 bg-gray-800 text-white text-[6px] w-2 h-2 flex items-center justify-center rounded-sm">2</span>
             </div>
-            <span>Multiple clusters</span>
+            <span>Overlapping</span>
           </div>
         </div>
         <Link 
@@ -254,6 +275,35 @@ function WeekCalendar({ reservations }: { reservations: Array<{ start_time: stri
         </Link>
       </div>
     </div>
+  )
+}
+
+function EnforcementStatusBadge({ status }: { status?: string | null }) {
+  if (!status) return null
+  const styles: Record<string, string> = {
+    provisioned: 'bg-green-100 text-green-800',
+    error: 'bg-red-100 text-red-800',
+    cleaned: 'bg-gray-100 text-gray-600',
+  }
+  return (
+    <span className={`inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium ${styles[status] || 'bg-gray-100 text-gray-600'}`}>
+      {status}
+    </span>
+  )
+}
+
+function ReservationTypeBadge({ reservation }: { reservation: { reservation_type?: string; gpu_count?: number | null } }) {
+  if (reservation.reservation_type === 'gpu') {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+        {reservation.gpu_count ?? '?'} GPU
+      </span>
+    )
+  }
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+      Cluster
+    </span>
   )
 }
 
@@ -284,9 +334,17 @@ export default function Reservations() {
     .filter((r) => r.status === 'completed' || r.status === 'cancelled')
     .sort((a, b) => new Date(b.end_time).getTime() - new Date(a.end_time).getTime())
 
+  const selectedClusterData = clusters.find(c => c.id === selectedCluster?.id)
+  const { data: gpuStatus } = useGpuStatus(selectedCluster?.id, !!selectedCluster)
+
   const handleSubmit = async () => {
     if (!form.cluster_id || !form.title || !form.user_name || !form.start_time || !form.end_time) {
       toast.error('Please fill in all required fields')
+      return
+    }
+
+    if (form.reservation_type === 'gpu' && (!form.gpu_count || parseInt(form.gpu_count) < 1)) {
+      toast.error('GPU count must be at least 1')
       return
     }
 
@@ -300,6 +358,9 @@ export default function Reservations() {
       start_time: new Date(form.start_time).toISOString(),
       end_time: new Date(form.end_time).toISOString(),
       purpose: form.purpose || undefined,
+      reservation_type: form.reservation_type,
+      gpu_count: form.reservation_type === 'gpu' ? parseInt(form.gpu_count) : undefined,
+      enforce_isolation: form.reservation_type === 'gpu' ? form.enforce_isolation : false,
     })
 
     setIsOpen(false)
@@ -379,6 +440,7 @@ export default function Reservations() {
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reservation</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cluster</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">User / Team</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ends</th>
                       <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
@@ -399,6 +461,15 @@ export default function Reservations() {
                           </div>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{reservation.cluster_name || 'Unknown'}</td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <ReservationTypeBadge reservation={reservation} />
+                          {reservation.enforcement_namespace && (
+                            <div className="flex items-center gap-1 mt-1">
+                              <p className="text-[10px] text-gray-500 font-mono">{reservation.enforcement_namespace}</p>
+                              <EnforcementStatusBadge status={reservation.enforcement_status} />
+                            </div>
+                          )}
+                        </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <p className="text-sm text-gray-900">{reservation.user_name}</p>
                           {reservation.team && <p className="text-xs text-gray-500">{reservation.team}</p>}
@@ -437,6 +508,7 @@ export default function Reservations() {
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Reservation</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cluster</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">User / Team</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Time</th>
                       <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
@@ -457,6 +529,9 @@ export default function Reservations() {
                           </div>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{reservation.cluster_name || 'Unknown'}</td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <ReservationTypeBadge reservation={reservation} />
+                        </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <p className="text-sm text-gray-900">{reservation.user_name}</p>
                           {reservation.team && <p className="text-xs text-gray-500">{reservation.team}</p>}
@@ -659,6 +734,101 @@ export default function Reservations() {
                       </Listbox>
                     </div>
 
+                    {/* Reservation Type Toggle */}
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Reservation Type *</label>
+                      <div className="flex rounded-lg border border-gray-300 overflow-hidden">
+                        <button
+                          type="button"
+                          onClick={() => setForm(prev => ({ ...prev, reservation_type: 'cluster', gpu_count: '', enforce_isolation: false }))}
+                          className={clsx(
+                            'flex-1 py-2 px-4 text-sm font-medium transition-colors',
+                            form.reservation_type === 'cluster'
+                              ? 'bg-primary-600 text-white'
+                              : 'bg-white text-gray-700 hover:bg-gray-50'
+                          )}
+                        >
+                          Full Cluster
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setForm(prev => ({ ...prev, reservation_type: 'gpu' }))}
+                          className={clsx(
+                            'flex-1 py-2 px-4 text-sm font-medium transition-colors border-l border-gray-300',
+                            form.reservation_type === 'gpu'
+                              ? 'bg-primary-600 text-white'
+                              : 'bg-white text-gray-700 hover:bg-gray-50'
+                          )}
+                        >
+                          Specific GPUs
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* GPU Count + Availability */}
+                    {form.reservation_type === 'gpu' && (
+                      <div className="space-y-3">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700">Number of GPUs *</label>
+                          <input
+                            type="number"
+                            min="1"
+                            max={gpuStatus?.free_gpus ?? gpuStatus?.total_gpus ?? 999}
+                            value={form.gpu_count}
+                            onChange={(e) => setForm(prev => ({ ...prev, gpu_count: e.target.value }))}
+                            className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
+                            placeholder="e.g., 2"
+                          />
+                        </div>
+                        {gpuStatus && (
+                          <div className="p-3 bg-blue-50 rounded-lg text-sm">
+                            <div className="font-medium text-blue-900 mb-1">GPU Availability</div>
+                            <div className="grid grid-cols-3 gap-2 text-blue-800">
+                              <div>Total: <span className="font-semibold">{gpuStatus.total_gpus}</span></div>
+                              <div>Allocated: <span className="font-semibold">{gpuStatus.allocated_gpus}</span></div>
+                              <div>Free: <span className="font-semibold text-green-700">{gpuStatus.free_gpus}</span></div>
+                            </div>
+                            {gpuStatus.gpu_types.length > 0 && (
+                              <div className="mt-2 space-y-1">
+                                {gpuStatus.gpu_types.map((t, i) => (
+                                  <div key={i} className="flex items-center justify-between text-xs text-blue-700">
+                                    <span>{t.product}</span>
+                                    <span>{t.free}/{t.count} free</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {gpuStatus.dra_available && (
+                              <div className="mt-1 text-xs text-blue-600">
+                                DRA {gpuStatus.dra_api_version} enabled
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        <div className="mt-3 relative">
+                          <label className="flex items-start gap-2 opacity-50 cursor-not-allowed">
+                            <input
+                              type="checkbox"
+                              checked={false}
+                              disabled
+                              className="mt-0.5 rounded border-gray-300 text-gray-400 cursor-not-allowed"
+                            />
+                            <span className="text-sm text-gray-500">
+                              <span className="font-medium">Enable isolation</span>
+                            </span>
+                          </label>
+                          <div className="group inline-block ml-1 align-middle">
+                            <span className="inline-flex items-center justify-center h-4 w-4 rounded-full bg-gray-300 text-[10px] font-bold text-white cursor-help">?</span>
+                            <div className="hidden group-hover:block absolute z-50 left-0 mt-1 w-72 p-3 bg-gray-900 text-white text-xs rounded-lg shadow-lg">
+                              <p className="font-semibold mb-1">Isolation is currently disabled</p>
+                              <p>When enabled, this creates a dedicated Kubernetes namespace with a ResourceQuota to enforce GPU limits directly on the cluster, preventing workloads from exceeding the reserved GPU count.</p>
+                              <p className="mt-1.5">This feature is intentionally disabled while the team evaluates its use in production. Reservations currently operate on a trust-based model.</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Title *</label>
                       <input
@@ -734,15 +904,30 @@ export default function Reservations() {
                       />
                     </div>
 
-                    {selectedCluster && (
-                      <div className="flex items-center gap-2 p-3 bg-gray-50 rounded-lg">
-                        <div 
-                          className="w-4 h-4 rounded-full" 
-                          style={{ backgroundColor: clusters.find(c => c.id === selectedCluster.id)?.color || '#3B82F6' }}
-                        />
-                        <span className="text-sm text-gray-600">
-                          Reservation will use <strong>{selectedCluster.name}</strong>'s color
-                        </span>
+                    {selectedCluster && selectedClusterData && (
+                      <div className="p-3 bg-gray-50 rounded-lg space-y-2">
+                        <div className="flex items-center gap-2">
+                          <div
+                            className="w-4 h-4 rounded-full"
+                            style={{ backgroundColor: selectedClusterData.color || '#3B82F6' }}
+                          />
+                          <span className="text-sm text-gray-600">
+                            Reservation will use <strong>{selectedCluster.name}</strong>'s color
+                          </span>
+                        </div>
+                        {(selectedClusterData.gpu_type || selectedClusterData.gpu_count) && (
+                          <div className="text-xs text-gray-500 flex gap-3">
+                            {selectedClusterData.gpu_type && (
+                              <span>GPU: <strong>{selectedClusterData.gpu_type}</strong></span>
+                            )}
+                            {selectedClusterData.gpu_count && (
+                              <span>Count: <strong>{selectedClusterData.gpu_count}</strong></span>
+                            )}
+                            {selectedClusterData.gpu_allocation_mode && (
+                              <span>Mode: <strong>{selectedClusterData.gpu_allocation_mode}</strong></span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

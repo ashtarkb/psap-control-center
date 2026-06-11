@@ -23,7 +23,7 @@ Once authenticated, the header shows your username and a **Sign Out** button. Yo
 The Dashboard gives you an overview of:
 
 - **Cluster stats** — total clusters, healthy count, total GPUs, active reservations
-- **Active Reservations** — currently in-use clusters with user details and time remaining
+- **Active Reservations** — currently in-use clusters with user details, reservation type, and time window
 - **Upcoming Reservations** — scheduled for the next 7 days
 - **Past Reservations** — completed and cancelled from the last 30 days
 - **Hearth GPU Inventory** — GPU types and counts from connected Hearth clusters (if configured)
@@ -38,12 +38,12 @@ The Dashboard gives you an overview of:
 4. Choose one of two connection methods:
 
 **Kubeconfig Upload:**
-- Select the **Kubeconfig** tab
+- Select the **Kubeconfig File** tab
 - Drag and drop your kubeconfig file or click to browse
 - The file is validated before saving
 
 **Kubeadmin Credentials:**
-- Select the **Credentials** tab
+- Select the **Kubeadmin Login** tab
 - Enter the **API server URL** (e.g., `https://api.cluster.example.com:6443`)
 - Enter the **username** (usually `kubeadmin`) and **password**
 - The system authenticates via OAuth and creates a service account for persistent access
@@ -59,8 +59,8 @@ Click any cluster card to see:
 - **Topology** — visual map of control plane, worker, and infrastructure nodes with GPU details
 - **OCP Details** — OpenShift version, platform, network type, ingress domain, available updates
 - **Operators** — installed OLM operators and their status
-- **Workloads** — running pods and deployments (filterable by namespace)
-- **Current User** — who has the cluster reserved right now
+- **Workloads** — running pods and deployments across all namespaces
+- **Currently Reserved** — list of active reservations with user, type, GPU count, enforcement namespace, and status
 
 Click any node in the topology view to see detailed specs (CPU, memory, GPU type, OS, kubelet version, IPs).
 
@@ -78,37 +78,78 @@ This does **not** affect the actual cluster — it only removes it from the Cont
 
 ## Managing Reservations
 
+### Reservation Types
+
+You can reserve resources in two ways:
+
+| Type | Description |
+| ---- | ----------- |
+| **Full Cluster** | Exclusive access to the entire cluster. No other reservations can overlap. |
+| **Specific GPUs** | Reserve a number of GPUs on a cluster. Multiple GPU reservations can coexist as long as total demand doesn't exceed capacity. |
+
 ### Creating a Reservation
 
 1. Go to **Reservations** in the sidebar
 2. Click **New Reservation**
 3. Fill in:
    - **Cluster** — select from the dropdown
+   - **Reservation Type** — toggle between "Full Cluster" and "Specific GPUs"
+   - If "Specific GPUs": enter the **Number of GPUs** you need. After selecting a cluster, the form shows live GPU availability (total, allocated, free) and per-type breakdowns.
    - **Title** — what you're doing (e.g., "vLLM benchmark run")
-   - **Your Name** and **Email**
+   - **Your Name**
    - **Team** (optional)
    - **Start Time** and **End Time**
    - **Purpose** (optional — testing, development, demo, etc.)
-   - **Notes** (optional)
-4. Click **Create**
+4. Click **Create Reservation**
 
-If the time slot conflicts with an existing reservation on that cluster, you'll see an error message with the conflicting reservation's details.
+Conflict detection is type-aware:
+- A full-cluster reservation blocks all other reservations during that time.
+- GPU reservations coexist unless the total GPU count exceeds the cluster's capacity.
+- GPU reservations conflict with any overlapping full-cluster reservation.
+
+### GPU Namespace Enforcement
+
+> **Note:** Enforcement namespaces are created only for **GPU reservations**, not full-cluster reservations.
+
+When a GPU reservation becomes active, the system automatically:
+
+1. Creates an isolated Kubernetes namespace (e.g., `psap-res-a1b2c3d4`)
+2. Applies a `ResourceQuota` limiting GPU usage to the reserved count
+3. If the cluster supports DRA (Dynamic Resource Allocation), creates a `ResourceClaimTemplate` for the reserved GPUs
+
+If a GPU reservation's start time is already in the past at creation, the namespace is provisioned immediately. For future reservations, the background task provisions the namespace when the reservation transitions to active (within ~30 seconds of the start time).
+
+The assigned namespace and its enforcement status (`provisioned`, `error`, `cleaned`) appear in the reservation details. Users should deploy their workloads to this namespace to use their reserved GPUs. When the reservation completes, is cancelled, or is deleted, the namespace is automatically cleaned up.
+
+**Important:** The GPU availability shown in the reservation form reflects *live cluster utilization* (actual pods/claims using GPUs). Conflict detection at booking time uses *scheduled reservation totals*. These values may differ — a cluster can show free GPUs while being fully reserved for a future window.
+
+### GPU Allocation Display
+
+Clusters that have GPUs show allocation details in several places:
+- **Cluster Detail page** — GPU Allocation card with total/allocated/free breakdown per GPU type, DRA status
+- **Dashboard** — fleet-level GPU reservation summary
+- **Reservation form** — live availability when creating GPU reservations
+- **Reservation tables** — type badge (Cluster/GPU) with GPU count on active and upcoming reservations
 
 ### Editing a Reservation
 
-1. Click on a reservation in the list
-2. Modify the fields
-3. Click **Save**
+> **Planned feature** — inline editing of reservation details (time, GPU count,
+> type) is not yet available in the UI. To change a reservation, cancel the
+> existing one and create a new reservation with the updated parameters.
 
-Time changes are re-checked for conflicts.
+### Cancelling vs Deleting a Reservation
 
-### Cancelling a Reservation
+| Action | Available on | Behaviour |
+|--------|-------------|-----------|
+| **Cancel** | Upcoming/scheduled reservations | Sets status to "Cancelled" with a timestamp and preserves the record for history. Enforcement namespaces are cleaned up immediately. |
+| **Delete** | Active, upcoming, and past reservations | Permanently removes the reservation record. Also cleans up any enforcement namespace immediately. |
 
-1. Find the reservation in the list
-2. Click **Cancel**
-3. The reservation moves to "Cancelled" status with a timestamp
+> **Note:** Active reservations can only be removed via **Delete** (the Cancel button is not shown for active reservations). Delete removes the record entirely. If you need to end an active reservation early while preserving history, you can use the API directly: `POST /api/v1/reservations/{id}/cancel`.
 
-Cancelled reservations are preserved for historical records.
+To cancel or delete:
+1. Find the reservation in the appropriate list
+2. Click the **Cancel** or **Delete** button
+3. Confirm the action
 
 ### Reservation Statuses
 
@@ -119,7 +160,7 @@ Cancelled reservations are preserved for historical records.
 | Completed | End time has passed |
 | Cancelled | Manually cancelled or auto-cancelled (cluster removed) |
 
-Status transitions happen automatically in the background every 60 seconds.
+Status transitions happen automatically in the background every 30 seconds. The enforcement reconciler also runs on the same cycle to provision namespaces for newly active GPU reservations and clean up completed ones.
 
 ## Calendar
 

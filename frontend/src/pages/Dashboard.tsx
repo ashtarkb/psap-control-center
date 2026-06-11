@@ -9,11 +9,14 @@ import {
   LockClosedIcon,
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
+import { useQueries } from '@tanstack/react-query'
 import { useClusters } from '../hooks/useClusters'
 import { useReservations } from '../hooks/useReservations'
 import { useHearthClusters } from '../hooks/useHearth'
+import { clusterApi } from '../services/api'
 import { format, startOfDay, endOfDay, addDays } from 'date-fns'
-import type { HearthCluster } from '../types'
+import type { HearthCluster, GpuAllocationStatus } from '../types'
+import GpuDonutChart from '../components/GpuDonutChart'
 
 export default function Dashboard() {
   const { data: clustersData, isLoading: clustersLoading } = useClusters()
@@ -36,8 +39,33 @@ export default function Dashboard() {
   const reservations = reservationsData?.reservations || []
 
   const healthyClusters = clusters.filter((c) => c.status === 'healthy').length
-  const totalGpus = clusters.reduce((sum, c) => sum + parseInt(c.gpu_count || '0'), 0)
   const activeReservations = reservations.filter((r) => r.status === 'active').length
+  const gpuReservations = reservations.filter((r) => r.status === 'active' && r.reservation_type === 'gpu')
+  const totalReservedGpus = gpuReservations.reduce((sum, r) => sum + (r.gpu_count || 0), 0)
+
+  const healthyClusterIds = clusters.filter((c) => c.status === 'healthy').map((c) => c.id)
+  const gpuStatusQueries = useQueries({
+    queries: healthyClusterIds.map((id) => ({
+      queryKey: ['gpu-status', id],
+      queryFn: () => clusterApi.getGpuStatus(id),
+      staleTime: 30_000,
+      refetchInterval: 60_000,
+    })),
+  })
+
+  const gpuTotals = gpuStatusQueries.reduce(
+    (acc, q) => {
+      const data = q.data as GpuAllocationStatus | undefined
+      if (data) {
+        acc.total += data.total_gpus
+        acc.allocated += data.allocated_gpus
+      }
+      return acc
+    },
+    { total: 0, allocated: 0 }
+  )
+  const gpuStatusLoading = gpuStatusQueries.some((q) => q.isLoading)
+  const totalGpus = gpuTotals.total || clusters.reduce((sum, c) => sum + parseInt(c.gpu_count || '0'), 0)
 
   const stats = [
     {
@@ -52,13 +80,6 @@ export default function Dashboard() {
       value: healthyClusters,
       icon: CheckCircleIcon,
       color: 'bg-green-500',
-      href: '/clusters',
-    },
-    {
-      name: 'Total GPUs',
-      value: totalGpus,
-      icon: CpuChipIcon,
-      color: 'bg-purple-500',
       href: '/clusters',
     },
     {
@@ -129,7 +150,53 @@ export default function Dashboard() {
             </div>
           </Link>
         ))}
+        <Link
+          to="/clusters"
+          className="card p-6 hover:shadow-md transition-shadow"
+        >
+          <div className="flex items-center gap-4">
+            {clustersLoading || gpuStatusLoading ? (
+              <div className="bg-purple-500 rounded-lg p-3">
+                <CpuChipIcon className="h-6 w-6 text-white" />
+              </div>
+            ) : (
+              <GpuDonutChart used={gpuTotals.allocated} total={totalGpus} size={64} strokeWidth={7} />
+            )}
+            <div>
+              <p className="text-sm font-medium text-gray-500">GPU Utilization</p>
+              {clustersLoading || gpuStatusLoading ? (
+                <p className="text-2xl font-semibold text-gray-900">...</p>
+              ) : (
+                <div className="flex items-baseline gap-1.5">
+                  <p className="text-2xl font-semibold text-gray-900">{gpuTotals.allocated}</p>
+                  <p className="text-sm text-gray-400">/</p>
+                  <p className="text-lg text-gray-500">{totalGpus}</p>
+                </div>
+              )}
+              <p className="text-xs text-gray-400 mt-0.5">used / total</p>
+            </div>
+          </div>
+        </Link>
       </div>
+
+      {/* GPU Reservation Summary */}
+      {totalReservedGpus > 0 && (
+        <div className="card p-4 bg-gradient-to-r from-purple-50 to-blue-50">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <CpuChipIcon className="h-6 w-6 text-purple-600" />
+              <div>
+                <p className="text-sm font-medium text-gray-700">GPU Reservations Active</p>
+                <p className="text-xs text-gray-500">{gpuReservations.length} reservation{gpuReservations.length !== 1 ? 's' : ''} using partial GPUs</p>
+              </div>
+            </div>
+            <div className="text-right">
+              <p className="text-2xl font-bold text-purple-700">{totalReservedGpus}</p>
+              <p className="text-xs text-gray-500">GPUs reserved of {totalGpus} total</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <div className="card">
@@ -148,42 +215,56 @@ export default function Dashboard() {
                 </Link>
               </div>
             ) : (
-              clusters.slice(0, 5).map((cluster) => (
-                <Link
-                  key={cluster.id}
-                  to={`/clusters/${cluster.id}`}
-                  className="flex items-center justify-between px-6 py-4 hover:bg-gray-50 transition-colors"
-                >
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={`h-3 w-3 rounded-full ${
-                        cluster.status === 'healthy'
-                          ? 'bg-green-500'
-                          : cluster.status === 'error'
-                          ? 'bg-red-500'
-                          : 'bg-yellow-500'
-                      }`}
-                    />
-                    <div>
-                      <p className="font-medium text-gray-900">{cluster.name}</p>
-                      <p className="text-sm text-gray-500">
-                        {cluster.node_count || '?'} nodes · {cluster.gpu_count || '0'} GPUs
-                      </p>
-                    </div>
-                  </div>
-                  <span
-                    className={`badge ${
-                      cluster.status === 'healthy'
-                        ? 'badge-success'
-                        : cluster.status === 'error'
-                        ? 'badge-error'
-                        : 'badge-warning'
-                    }`}
+              clusters.slice(0, 5).map((cluster) => {
+                const gpuData = gpuStatusQueries.find(
+                  (_q, i) => healthyClusterIds[i] === cluster.id
+                )?.data as GpuAllocationStatus | undefined
+                const clusterTotal = gpuData?.total_gpus ?? parseInt(cluster.gpu_count || '0')
+                const clusterUsed = gpuData?.allocated_gpus ?? 0
+
+                return (
+                  <Link
+                    key={cluster.id}
+                    to={`/clusters/${cluster.id}`}
+                    className="flex items-center justify-between px-6 py-4 hover:bg-gray-50 transition-colors"
                   >
-                    {cluster.status}
-                  </span>
-                </Link>
-              ))
+                    <div className="flex items-center gap-3">
+                      <div
+                        className={`h-3 w-3 rounded-full ${
+                          cluster.status === 'healthy'
+                            ? 'bg-green-500'
+                            : cluster.status === 'error'
+                            ? 'bg-red-500'
+                            : 'bg-yellow-500'
+                        }`}
+                      />
+                      <div>
+                        <p className="font-medium text-gray-900">{cluster.name}</p>
+                        <p className="text-sm text-gray-500">
+                          {cluster.node_count || '?'} nodes · {clusterUsed}/{clusterTotal} GPUs
+                          {cluster.gpu_type && <span className="ml-1">({cluster.gpu_type})</span>}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      {clusterTotal > 0 && (
+                        <GpuDonutChart used={clusterUsed} total={clusterTotal} size={40} strokeWidth={5} />
+                      )}
+                      <span
+                        className={`badge ${
+                          cluster.status === 'healthy'
+                            ? 'badge-success'
+                            : cluster.status === 'error'
+                            ? 'badge-error'
+                            : 'badge-warning'
+                        }`}
+                      >
+                        {cluster.status}
+                      </span>
+                    </div>
+                  </Link>
+                )
+              })
             )}
           </div>
           {clusters.length > 5 && (
@@ -228,12 +309,33 @@ export default function Dashboard() {
                       style={{ backgroundColor: reservation.color }}
                     />
                     <div>
-                      <p className="font-medium text-gray-900">{reservation.title}</p>
+                      <p className="font-medium text-gray-900">
+                        {reservation.title}
+                        {reservation.reservation_type === 'gpu' && (
+                          <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-800">
+                            {reservation.gpu_count} GPU
+                          </span>
+                        )}
+                      </p>
                       <p className="text-sm text-gray-500">
-                        {reservation.cluster_name}
+                        {reservation.cluster_name || 'Unknown'}
                       </p>
                       <p className="text-xs text-gray-400">
                         {reservation.user_name}{reservation.team && ` · ${reservation.team}`}
+                        {reservation.enforcement_namespace && (
+                          <span className="ml-1 font-mono">
+                            ({reservation.enforcement_namespace})
+                            {reservation.enforcement_status && (
+                              <span className={`ml-1 px-1 py-0.5 rounded text-[9px] font-medium ${
+                                reservation.enforcement_status === 'provisioned' ? 'bg-green-100 text-green-800' :
+                                reservation.enforcement_status === 'error' ? 'bg-red-100 text-red-800' :
+                                'bg-gray-100 text-gray-600'
+                              }`}>
+                                {reservation.enforcement_status}
+                              </span>
+                            )}
+                          </span>
+                        )}
                       </p>
                     </div>
                   </div>

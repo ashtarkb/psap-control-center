@@ -35,6 +35,8 @@ class Cluster(Base):
     
     node_count = Column(String(20), nullable=True)
     gpu_count = Column(String(20), nullable=True)
+    gpu_type = Column(String(255), nullable=True)
+    gpu_allocation_mode = Column(String(20), nullable=True)
     cluster_version = Column(String(50), nullable=True)
     
     metadata_info = Column(JSON, nullable=True)

@@ -8,6 +8,8 @@ export interface Cluster {
   last_health_check?: string
   node_count?: string
   gpu_count?: string
+  gpu_type?: string
+  gpu_allocation_mode?: string
   cluster_version?: string
   metadata_info?: Record<string, unknown>
   tags?: string[]
@@ -21,11 +23,39 @@ export interface ClusterStatus {
   api_server_url?: string
   node_count?: string
   gpu_count?: string
+  gpu_type?: string
+  gpu_allocation_mode?: string
   cluster_version?: string
   last_health_check?: string
   nodes?: NodeInfo[]
   namespaces?: string[]
   resource_usage?: ResourceUsage
+}
+
+export interface GpuTypeInfo {
+  product: string
+  count: number
+  allocated: number
+  free: number
+  node_count: number
+}
+
+export interface GpuPodInfo {
+  name: string
+  namespace: string
+  gpu_count: number
+  node?: string
+}
+
+export interface GpuAllocationStatus {
+  gpu_allocation_mode: string
+  dra_available: boolean
+  dra_api_version?: string
+  total_gpus: number
+  allocated_gpus: number
+  free_gpus: number
+  gpu_types: GpuTypeInfo[]
+  gpu_pods: GpuPodInfo[]
 }
 
 export interface NodeInfo {
@@ -46,10 +76,12 @@ export interface ResourceUsage {
   total_nodes: number
 }
 
+export type ReservationType = 'cluster' | 'gpu'
+
 export interface Reservation {
   id: string
-  cluster_id?: string | null  // Can be null if cluster was removed
-  cluster_name?: string  // Preserved even after cluster removal
+  cluster_id?: string | null
+  cluster_name?: string
   title: string
   description?: string
   user_name: string
@@ -57,6 +89,11 @@ export interface Reservation {
   team?: string
   start_time: string
   end_time: string
+  reservation_type: ReservationType
+  gpu_count?: number | null
+  enforce_isolation: boolean
+  enforcement_namespace?: string | null
+  enforcement_status?: string | null
   purpose?: string
   notes?: string
   color: string
@@ -70,13 +107,35 @@ export interface CalendarEvent {
   title: string
   start: string
   end: string
-  cluster_id?: string | null  // Can be null if cluster was removed
-  cluster_name: string  // Always preserved
+  cluster_id?: string | null
+  cluster_name: string
   user_name: string
   team?: string
   status: string
   color: string
   description?: string
+  reservation_type: ReservationType
+  gpu_count?: number | null
+}
+
+export interface ClusterOccupancyResponse {
+  occupied: boolean
+  reservations: Array<{
+    user_name: string
+    team?: string
+    title: string
+    start_time: string
+    end_time: string
+    reservation_type: ReservationType
+    gpu_count?: number | null
+    enforcement_namespace?: string | null
+    enforcement_status?: string | null
+  }>
+  gpu_summary?: {
+    total_reserved_gpus: number
+    has_cluster_reservation: boolean
+    reservation_count: number
+  } | null
 }
 
 export interface ClusterListResponse {

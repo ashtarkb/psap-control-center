@@ -1,11 +1,10 @@
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 from typing import Dict, Any, List, Optional
+from dataclasses import dataclass, asdict
 import yaml
 import os
-import tempfile
 import httpx
-import ssl
 import urllib3
 
 from app.utils.logger import create_logger
@@ -14,6 +13,63 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = create_logger("KubernetesService")
 
+DRA_API_GROUP = "resource.k8s.io"
+DRA_VERSION_PREFERENCE = ["v1", "v1beta2", "v1beta1"]
+DRA_GPU_DRIVER_NAMES = ["gpu.nvidia.com", "gpu.intel.com", "gpu.amd.com"]
+DRA_CONFIGMAP_NAME = "gpu-fleet-viewer-config"
+DRA_CONFIGMAP_NAMESPACE = "gpu-fleet-viewer"
+K8S_API_TIMEOUT = 20
+
+
+@dataclass
+class GpuTypeInfo:
+    product: str
+    count: int
+    allocated: int
+    free: int
+    node_count: int
+
+
+@dataclass
+class NodeGpuInfo:
+    name: str
+    gpu_capacity: int
+    gpu_allocated: int
+    gpu_product: Optional[str]
+    schedulable: bool
+
+
+@dataclass
+class GpuPodInfo:
+    name: str
+    namespace: str
+    gpu_count: int
+    node: Optional[str] = None
+
+
+@dataclass
+class GpuAllocationStatus:
+    gpu_allocation_mode: str = "legacy"
+    dra_available: bool = False
+    dra_api_version: Optional[str] = None
+    total_gpus: int = 0
+    allocated_gpus: int = 0
+    free_gpus: int = 0
+    gpu_types: list = None
+    nodes: list = None
+    gpu_pods: list = None
+
+    def __post_init__(self):
+        if self.gpu_types is None:
+            self.gpu_types = []
+        if self.nodes is None:
+            self.nodes = []
+        if self.gpu_pods is None:
+            self.gpu_pods = []
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
 
 class KubernetesService:
     def __init__(self, kubeconfig_path: str):
@@ -21,6 +77,7 @@ class KubernetesService:
         self._api_client = None
         self._core_v1 = None
         self._version_api = None
+        self._custom_objects = None
         self._configuration = None
 
     def _load_config(self):
@@ -52,15 +109,34 @@ class KubernetesService:
             self._load_config()
         return self._version_api
 
+    @property
+    def custom_objects(self):
+        if self._custom_objects is None:
+            self._load_config()
+            self._custom_objects = client.CustomObjectsApi(self._api_client)
+        return self._custom_objects
+
     def get_cluster_info(self) -> Dict[str, Any]:
         try:
             version_info = self.version_api.get_code()
             nodes = self.core_v1.list_node()
-            
+
             gpu_count = 0
             node_details = []
-            
+            gpu_products = {}
+
             for node in nodes.items:
+                labels = node.metadata.labels or {}
+                node_gpu = int(node.status.capacity.get("nvidia.com/gpu", 0))
+                gpu_product = labels.get("nvidia.com/gpu.product", "")
+                gpu_memory = labels.get("nvidia.com/gpu.memory", "")
+
+                if gpu_product and node_gpu > 0:
+                    display_name = gpu_product.replace("-", " ")
+                    if gpu_memory and gpu_memory.isdigit():
+                        display_name = f"{display_name} ({int(gpu_memory) // 1024}GB)"
+                    gpu_products[display_name] = gpu_products.get(display_name, 0) + node_gpu
+
                 node_info = {
                     "name": node.metadata.name,
                     "status": self._get_node_status(node),
@@ -70,13 +146,19 @@ class KubernetesService:
                     "gpu": node.status.capacity.get("nvidia.com/gpu", "0"),
                 }
                 node_details.append(node_info)
-                gpu_count += int(node.status.capacity.get("nvidia.com/gpu", 0))
+                gpu_count += node_gpu
+
+            gpu_type = None
+            if gpu_products:
+                dominant = max(gpu_products, key=gpu_products.get)
+                gpu_type = dominant
 
             return {
                 "status": "healthy",
                 "cluster_version": f"{version_info.git_version}",
                 "node_count": str(len(nodes.items)),
                 "gpu_count": str(gpu_count),
+                "gpu_type": gpu_type,
                 "nodes": node_details,
                 "api_server": self._get_api_server_url()
             }
@@ -187,6 +269,452 @@ class KubernetesService:
             return True
         except Exception:
             return False
+
+    # ── DRA (Dynamic Resource Allocation) support ──────────────────────────
+
+    def _detect_dra_version(self) -> Optional[str]:
+        """Probe the API server for supported DRA API versions."""
+        try:
+            if self._api_client is None:
+                self._load_config()
+            api_groups = client.ApisApi(self._api_client).get_api_versions()
+            dra_versions = set()
+            for group in api_groups.groups:
+                if group.name == DRA_API_GROUP:
+                    for v in group.versions:
+                        dra_versions.add(v.version)
+                    break
+
+            for preferred in DRA_VERSION_PREFERENCE:
+                if preferred in dra_versions:
+                    return preferred
+            return next(iter(dra_versions), None)
+        except Exception as e:
+            logger.warning(f"DRA version detection failed: {e}")
+            return None
+
+    def _load_gpu_config_from_configmap(self) -> Dict[str, Any]:
+        """
+        Attempt to read a ConfigMap (gpu-fleet-viewer-config) that provides
+        vendor-specific GPU resource names. Falls back to NVIDIA defaults.
+        """
+        default_config = {
+            "gpu_resource_name": "nvidia.com/gpu",
+            "product_label": "nvidia.com/gpu.product",
+            "memory_label": "nvidia.com/gpu.memory",
+            "driver_version_label": "nvidia.com/driver-version",
+            "cuda_version_label": "nvidia.com/cuda-driver-version",
+        }
+        try:
+            cm = self.core_v1.read_namespaced_config_map(
+                name=DRA_CONFIGMAP_NAME,
+                namespace=DRA_CONFIGMAP_NAMESPACE
+            )
+            data = cm.data or {}
+            if "gpu_resource_name" in data:
+                config_merged = {**default_config}
+                for key in default_config:
+                    if key in data:
+                        config_merged[key] = data[key]
+                logger.info(f"Using ConfigMap GPU config: {config_merged}")
+                return config_merged
+        except ApiException as e:
+            if e.status != 404:
+                logger.warning(f"Error reading GPU ConfigMap: {e}")
+        except Exception as e:
+            logger.warning(f"Error reading GPU ConfigMap: {e}")
+
+        return default_config
+
+    @staticmethod
+    def _extract_dra_attribute(attrs: dict, key: str) -> Optional[str]:
+        """Extract a typed DRA device attribute value by key (exact or substring match)."""
+        for attr_key, attr_val in attrs.items():
+            if key == attr_key or key in attr_key:
+                if isinstance(attr_val, dict):
+                    return (attr_val.get("string")
+                            or attr_val.get("stringValue")
+                            or attr_val.get("version")
+                            or str(attr_val))
+                return str(attr_val)
+        return None
+
+    def _get_gpu_allocation_dra(self, dra_version: str) -> GpuAllocationStatus:
+        """Count GPUs via DRA ResourceSlice and ResourceClaim objects."""
+        status = GpuAllocationStatus(
+            gpu_allocation_mode="dra",
+            dra_available=True,
+            dra_api_version=dra_version,
+        )
+
+        try:
+            slices = self.custom_objects.list_cluster_custom_object(
+                group=DRA_API_GROUP, version=dra_version, plural="resourceslices",
+                _request_timeout=K8S_API_TIMEOUT,
+            )
+        except ApiException as e:
+            logger.warning(f"DRA ResourceSlice list failed ({e.status}), falling back to legacy")
+            return self._get_gpu_allocation_legacy()
+
+        node_gpus: Dict[str, NodeGpuInfo] = {}
+        gpu_type_counts: Dict[str, GpuTypeInfo] = {}
+        gpu_driver_found = False
+
+        for rs in slices.get("items", []):
+            driver = rs.get("spec", {}).get("driver", "")
+            if driver not in DRA_GPU_DRIVER_NAMES:
+                continue
+            gpu_driver_found = True
+
+            node_name = rs.get("spec", {}).get("nodeName") or rs.get("nodeName")
+            if not node_name:
+                continue
+            devices = rs.get("spec", {}).get("devices", []) or []
+            if not devices:
+                continue
+
+            product = "Unknown GPU"
+            for device in devices:
+                attrs = device.get("attributes", {})
+                if not attrs:
+                    attrs = device.get("basic", {}).get("attributes", {})
+                name = self._extract_dra_attribute(attrs, "productName")
+                if name:
+                    product = name
+                    break
+
+            gpu_count = len(devices)
+            if node_name not in node_gpus:
+                node_gpus[node_name] = NodeGpuInfo(
+                    name=node_name, gpu_capacity=0, gpu_allocated=0,
+                    gpu_product=product, schedulable=True
+                )
+            node_gpus[node_name].gpu_capacity += gpu_count
+
+            if product not in gpu_type_counts:
+                gpu_type_counts[product] = GpuTypeInfo(
+                    product=product, count=0, allocated=0, free=0, node_count=0
+                )
+            gpu_type_counts[product].count += gpu_count
+
+        if not gpu_driver_found:
+            logger.info("DRA API present but no GPU driver ResourceSlices found, falling back to legacy")
+            return self._get_gpu_allocation_legacy()
+
+        # Count allocations from DRA ResourceClaims
+        try:
+            claims = self.custom_objects.list_cluster_custom_object(
+                group=DRA_API_GROUP, version=dra_version, plural="resourceclaims",
+                _request_timeout=K8S_API_TIMEOUT,
+            )
+            for claim in claims.get("items", []):
+                alloc = claim.get("status", {}).get("allocation", {})
+                devices = alloc.get("devices", {}).get("results", [])
+                for result in devices:
+                    req_driver = result.get("driver", "")
+                    if req_driver and req_driver not in DRA_GPU_DRIVER_NAMES:
+                        continue
+                    pool_name = result.get("pool", "")
+                    for node_name, info in node_gpus.items():
+                        if (pool_name == node_name
+                                or pool_name.endswith(
+                                    f"-{node_name}")):
+                            info.gpu_allocated += 1
+                            break
+        except ApiException:
+            logger.warning("Could not list ResourceClaims; allocation counts may be incomplete")
+        except Exception as e:
+            logger.warning(f"Error counting DRA allocations: {e}")
+
+        # Also count traditional pod-level nvidia.com/gpu resource requests
+        # (workloads not using DRA still request GPUs the classic way)
+        gpu_config = self._load_gpu_config_from_configmap()
+        gpu_resource = gpu_config.get("gpu_resource_name", "nvidia.com/gpu")
+        gpu_pods: List[GpuPodInfo] = []
+        try:
+            pods = self.core_v1.list_pod_for_all_namespaces(
+                _request_timeout=K8S_API_TIMEOUT
+            )
+            for pod in pods.items:
+                if pod.status.phase not in ("Running", "Pending"):
+                    continue
+                # Skip pods that use DRA ResourceClaims to avoid
+                # double-counting GPUs already tallied above
+                pod_claims = getattr(
+                    pod.spec, "resource_claims", None
+                )
+                if pod_claims:
+                    continue
+                pod_node = pod.spec.node_name
+                pod_total_gpu = 0
+                for ctr in (pod.spec.containers or []):
+                    reqs = (
+                        (ctr.resources.requests or {})
+                        if ctr.resources else {}
+                    )
+                    gpu_req = int(reqs.get(gpu_resource, 0))
+                    if gpu_req > 0:
+                        pod_total_gpu += gpu_req
+                        if pod_node and pod_node in node_gpus:
+                            node_gpus[pod_node].gpu_allocated += gpu_req
+                if pod_total_gpu > 0:
+                    gpu_pods.append(GpuPodInfo(
+                        name=pod.metadata.name,
+                        namespace=pod.metadata.namespace,
+                        gpu_count=pod_total_gpu,
+                        node=pod_node,
+                    ))
+        except Exception as e:
+            logger.warning(
+                f"Could not list pods for legacy GPU counting: {e}"
+            )
+
+        # Aggregate into the status object
+        unique_nodes_per_type: Dict[str, set] = {}
+        for node_name, info in node_gpus.items():
+            product = info.gpu_product or "Unknown GPU"
+            if product not in unique_nodes_per_type:
+                unique_nodes_per_type[product] = set()
+            unique_nodes_per_type[product].add(node_name)
+            if product in gpu_type_counts:
+                gpu_type_counts[product].allocated += info.gpu_allocated
+
+        for product, info in gpu_type_counts.items():
+            info.free = info.count - info.allocated
+            info.node_count = len(unique_nodes_per_type.get(product, set()))
+
+        status.gpu_types = list(gpu_type_counts.values())
+        status.nodes = list(node_gpus.values())
+        status.gpu_pods = gpu_pods
+        status.total_gpus = sum(t.count for t in status.gpu_types)
+        status.allocated_gpus = sum(t.allocated for t in status.gpu_types)
+        status.free_gpus = status.total_gpus - status.allocated_gpus
+        return status
+
+    def _get_gpu_allocation_legacy(self) -> GpuAllocationStatus:
+        """Count GPUs from node capacity and pod resource requests (non-DRA)."""
+        status = GpuAllocationStatus(gpu_allocation_mode="legacy")
+
+        try:
+            nodes = self.core_v1.list_node(_request_timeout=K8S_API_TIMEOUT)
+            pods = self.core_v1.list_pod_for_all_namespaces(
+                _request_timeout=K8S_API_TIMEOUT
+            )
+        except Exception as e:
+            logger.error(f"Legacy GPU allocation query failed: {e}")
+            return status
+
+        gpu_config = self._load_gpu_config_from_configmap()
+        gpu_resource = gpu_config.get("gpu_resource_name", "nvidia.com/gpu")
+        product_label = gpu_config.get("product_label", "nvidia.com/gpu.product")
+        memory_label = gpu_config.get("memory_label", "nvidia.com/gpu.memory")
+
+        node_gpus: Dict[str, NodeGpuInfo] = {}
+        gpu_type_counts: Dict[str, GpuTypeInfo] = {}
+
+        for node in nodes.items:
+            labels = node.metadata.labels or {}
+            capacity = int(node.status.capacity.get(gpu_resource, 0))
+            if capacity == 0:
+                continue
+
+            product = labels.get(product_label, "Unknown GPU")
+            if product != "Unknown GPU":
+                product = product.replace("-", " ")
+                mem = labels.get(memory_label, "")
+                if mem and mem.isdigit():
+                    product = f"{product} ({int(mem) // 1024}GB)"
+
+            schedulable = not (node.spec.unschedulable or False)
+            node_gpus[node.metadata.name] = NodeGpuInfo(
+                name=node.metadata.name,
+                gpu_capacity=capacity,
+                gpu_allocated=0,
+                gpu_product=product,
+                schedulable=schedulable,
+            )
+
+            if product not in gpu_type_counts:
+                gpu_type_counts[product] = GpuTypeInfo(
+                    product=product, count=0, allocated=0, free=0, node_count=0
+                )
+            gpu_type_counts[product].count += capacity
+
+        # Sum pod GPU requests as allocated
+        gpu_pods: List[GpuPodInfo] = []
+        for pod in pods.items:
+            if pod.status.phase not in ("Running", "Pending"):
+                continue
+            node_name = pod.spec.node_name
+            pod_total_gpu = 0
+            for container in (pod.spec.containers or []):
+                requests = (container.resources.requests or {}) if container.resources else {}
+                gpu_req = int(requests.get(gpu_resource, 0))
+                if gpu_req > 0:
+                    pod_total_gpu += gpu_req
+                    if node_name and node_name in node_gpus:
+                        node_gpus[node_name].gpu_allocated += gpu_req
+            if pod_total_gpu > 0:
+                gpu_pods.append(GpuPodInfo(
+                    name=pod.metadata.name,
+                    namespace=pod.metadata.namespace,
+                    gpu_count=pod_total_gpu,
+                    node=node_name,
+                ))
+
+        # Aggregate per-type
+        unique_nodes_per_type: Dict[str, set] = {}
+        for node_name, info in node_gpus.items():
+            product = info.gpu_product or "Unknown GPU"
+            if product not in unique_nodes_per_type:
+                unique_nodes_per_type[product] = set()
+            unique_nodes_per_type[product].add(node_name)
+            if product in gpu_type_counts:
+                gpu_type_counts[product].allocated += info.gpu_allocated
+
+        for product, info in gpu_type_counts.items():
+            info.free = info.count - info.allocated
+            info.node_count = len(unique_nodes_per_type.get(product, set()))
+
+        status.gpu_types = list(gpu_type_counts.values())
+        status.nodes = list(node_gpus.values())
+        status.gpu_pods = gpu_pods
+        status.total_gpus = sum(t.count for t in status.gpu_types)
+        status.allocated_gpus = sum(t.allocated for t in status.gpu_types)
+        status.free_gpus = status.total_gpus - status.allocated_gpus
+        return status
+
+    def get_gpu_allocation(self) -> GpuAllocationStatus:
+        """
+        Get GPU allocation status using DRA if available, otherwise fall back
+        to legacy node capacity + pod resource counting.
+        """
+        try:
+            dra_version = self._detect_dra_version()
+            if dra_version:
+                logger.info(f"DRA detected at {DRA_API_GROUP}/{dra_version}")
+                return self._get_gpu_allocation_dra(dra_version)
+            else:
+                logger.info("DRA not available, using legacy GPU counting")
+                return self._get_gpu_allocation_legacy()
+        except Exception as e:
+            logger.error(f"get_gpu_allocation failed: {e}")
+            return GpuAllocationStatus()
+
+    # ── Namespace + Enforcement helpers ────────────────────────────────────
+
+    def create_namespace(self, name: str, labels: Optional[Dict[str, str]] = None) -> bool:
+        """Create a Kubernetes namespace. Returns True if created, False if already exists."""
+        body = client.V1Namespace(
+            metadata=client.V1ObjectMeta(name=name, labels=labels or {})
+        )
+        try:
+            self.core_v1.create_namespace(body=body)
+            logger.info(f"Created namespace {name}")
+            return True
+        except ApiException as e:
+            if e.status == 409:
+                logger.info(f"Namespace {name} already exists")
+                return False
+            raise
+
+    def delete_namespace(self, name: str) -> bool:
+        """Delete a Kubernetes namespace. Returns True if deleted."""
+        try:
+            self.core_v1.delete_namespace(name=name)
+            logger.info(f"Deleted namespace {name}")
+            return True
+        except ApiException as e:
+            if e.status == 404:
+                logger.info(f"Namespace {name} not found (already deleted)")
+                return False
+            raise
+
+    def create_resource_quota(
+        self, namespace: str, gpu_count: int, gpu_resource: str = "nvidia.com/gpu"
+    ) -> None:
+        """Apply a ResourceQuota limiting GPU usage in the given namespace."""
+        quota = client.V1ResourceQuota(
+            metadata=client.V1ObjectMeta(
+                name="gpu-reservation-quota",
+                namespace=namespace,
+            ),
+            spec=client.V1ResourceQuotaSpec(
+                hard={f"requests.{gpu_resource}": str(gpu_count)}
+            ),
+        )
+        try:
+            self.core_v1.create_namespaced_resource_quota(
+                namespace=namespace, body=quota
+            )
+            logger.info(f"Created ResourceQuota in {namespace}: {gpu_count} GPUs")
+        except ApiException as e:
+            if e.status == 409:
+                self.core_v1.replace_namespaced_resource_quota(
+                    name="gpu-reservation-quota", namespace=namespace, body=quota
+                )
+                logger.info(f"Updated ResourceQuota in {namespace}: {gpu_count} GPUs")
+            else:
+                raise
+
+    def create_resource_claim_template(
+        self, namespace: str, gpu_count: int, device_class: str = "gpu.nvidia.com"
+    ) -> Optional[str]:
+        """Create a DRA ResourceClaimTemplate in the given namespace. Returns template name or None."""
+        dra_version = self._detect_dra_version()
+        if not dra_version:
+            logger.info("DRA not available; skipping ResourceClaimTemplate creation")
+            return None
+
+        template_name = f"gpu-reservation-{namespace}"
+        body = {
+            "apiVersion": f"{DRA_API_GROUP}/{dra_version}",
+            "kind": "ResourceClaimTemplate",
+            "metadata": {
+                "name": template_name,
+                "namespace": namespace,
+            },
+            "spec": {
+                "spec": {
+                    "devices": {
+                        "requests": [{
+                            "name": "gpu",
+                            "deviceClassName": device_class,
+                            "count": gpu_count,
+                        }]
+                    }
+                }
+            },
+        }
+
+        try:
+            self.custom_objects.create_namespaced_custom_object(
+                group=DRA_API_GROUP, version=dra_version,
+                namespace=namespace, plural="resourceclaimtemplates",
+                body=body,
+            )
+            logger.info(f"Created ResourceClaimTemplate {template_name} in {namespace}")
+            return template_name
+        except ApiException as e:
+            if e.status == 409:
+                logger.info(f"ResourceClaimTemplate {template_name} already exists")
+                return template_name
+            logger.error(f"Failed to create ResourceClaimTemplate: {e}")
+            return None
+
+    def discover_device_classes(self) -> List[str]:
+        """List available DRA DeviceClass names on this cluster."""
+        dra_version = self._detect_dra_version()
+        if not dra_version:
+            return []
+        try:
+            result = self.custom_objects.list_cluster_custom_object(
+                group=DRA_API_GROUP, version=dra_version, plural="deviceclasses"
+            )
+            return [dc["metadata"]["name"] for dc in result.get("items", [])]
+        except Exception as e:
+            logger.warning(f"Could not list DeviceClasses: {e}")
+            return []
 
     def get_topology(self) -> Dict[str, Any]:
         """Get cluster topology with detailed node information for visualization."""

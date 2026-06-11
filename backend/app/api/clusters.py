@@ -11,12 +11,33 @@ from app.schemas.cluster import (
     ClusterUpdate,
     ClusterResponse,
     ClusterStatus,
-    ClusterListResponse
+    ClusterListResponse,
+    GpuAllocationStatus as GpuAllocationStatusSchema,
 )
 from app.utils.logger import create_logger
 
 router = APIRouter()
 logger = create_logger("ClustersAPI")
+
+
+@router.get("/refresh-schedule")
+async def get_refresh_schedule():
+    """Return the server-driven cluster refresh schedule so all clients share the same clock."""
+    from datetime import datetime, timezone
+    from app.main import cluster_refresh_state
+
+    now = datetime.now(timezone.utc)
+    last = cluster_refresh_state.get("last_refresh")
+    nxt = cluster_refresh_state.get("next_refresh")
+
+    return {
+        "server_time": now.isoformat(),
+        "last_refresh": last.isoformat() if last else None,
+        "next_refresh": nxt.isoformat() if nxt else None,
+        "in_progress": cluster_refresh_state.get("in_progress", False),
+        "total": cluster_refresh_state.get("total", 0),
+        "completed": cluster_refresh_state.get("completed", 0),
+    }
 
 
 # Static routes must be registered before dynamic /{cluster_id} routes
@@ -324,6 +345,95 @@ async def get_cluster_topology(
         return topology
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{cluster_id}/gpu-status", response_model=GpuAllocationStatusSchema)
+async def get_gpu_status(
+    cluster_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get live GPU allocation status via DRA or legacy counting."""
+    service = ClusterService(db)
+    cluster = await service.get_cluster(cluster_id)
+
+    if not cluster:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+
+    if not cluster.kubeconfig_path:
+        raise HTTPException(status_code=400, detail="Cluster has no kubeconfig configured")
+
+    try:
+        k8s_service = KubernetesService(cluster.kubeconfig_path)
+        allocation = k8s_service.get_gpu_allocation()
+
+        # Persist GPU pod sightings so we can show history later
+        from app.services.gpu_pod_history_service import sync_gpu_pods
+        try:
+            await sync_gpu_pods(db, cluster_id, [
+                {"name": p.name, "namespace": p.namespace, "gpu_count": p.gpu_count, "node": p.node}
+                for p in allocation.gpu_pods
+            ])
+        except Exception as sync_err:
+            logger.warning(f"GPU pod history sync failed: {sync_err}")
+
+        return GpuAllocationStatusSchema(
+            gpu_allocation_mode=allocation.gpu_allocation_mode,
+            dra_available=allocation.dra_available,
+            dra_api_version=allocation.dra_api_version,
+            total_gpus=allocation.total_gpus,
+            allocated_gpus=allocation.allocated_gpus,
+            free_gpus=allocation.free_gpus,
+            gpu_types=[{
+                "product": t.product,
+                "count": t.count,
+                "allocated": t.allocated,
+                "free": t.free,
+                "node_count": t.node_count,
+            } for t in allocation.gpu_types],
+            gpu_pods=[{
+                "name": p.name,
+                "namespace": p.namespace,
+                "gpu_count": p.gpu_count,
+                "node": p.node,
+            } for p in allocation.gpu_pods],
+        )
+    except Exception as e:
+        logger.error(f"Failed to fetch GPU status for cluster {cluster_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to fetch GPU allocation status",
+        ) from e
+
+
+@router.get("/{cluster_id}/gpu-pod-history")
+async def get_gpu_pod_history(
+    cluster_id: str,
+    limit: int = 25,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return recently finished GPU pods for a cluster."""
+    service = ClusterService(db)
+    cluster = await service.get_cluster(cluster_id)
+    if not cluster:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+
+    from app.services.gpu_pod_history_service import get_pod_history
+    records = await get_pod_history(db, cluster_id, limit)
+    return {
+        "pods": [
+            {
+                "name": r.pod_name,
+                "namespace": r.namespace,
+                "gpu_count": r.gpu_count,
+                "node": r.node,
+                "first_seen": r.first_seen.isoformat() if r.first_seen else None,
+                "last_seen": r.last_seen.isoformat() if r.last_seen else None,
+                "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            }
+            for r in records
+        ],
+        "total": len(records),
+    }
 
 
 @router.get("/{cluster_id}/ocp-details")
