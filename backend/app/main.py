@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from app.core.config import settings
@@ -14,6 +15,9 @@ set_log_level_from_env()
 logger = create_logger("Main")
 
 CLUSTER_REFRESH_INTERVAL = 600  # 10 minutes in seconds
+CLUSTER_REFRESH_TIMEOUT = 120   # per-cluster timeout in seconds
+
+_refresh_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="cluster-refresh")
 
 cluster_refresh_state = {
     "last_refresh": None,
@@ -64,11 +68,28 @@ def _next_aligned_refresh() -> datetime:
     return datetime.fromtimestamp(next_s, tz=timezone.utc)
 
 
+async def _refresh_one_cluster(cluster_id: str, cluster_name: str) -> bool:
+    """Refresh a single cluster. K8s calls run on the dedicated thread pool;
+    DB operations stay on the main event loop."""
+    from app.services.cluster_service import ClusterService
+    try:
+        async with AsyncSessionLocal() as session:
+            svc = ClusterService(session)
+            await svc.refresh_cluster_status(cluster_id, executor=_refresh_executor)
+        return True
+    except Exception as e:
+        logger.warning(f"Auto-refresh failed for {cluster_name}: {e}")
+        return False
+
+
 async def cluster_refresh_task():
-    """Background task to refresh all cluster statuses on a fixed 10-minute interval."""
+    """Background task to refresh all cluster statuses in parallel.
+    K8s I/O is dispatched to a dedicated thread pool so the main event loop
+    stays responsive for API requests."""
     from app.services.cluster_service import ClusterService
 
-    # Run immediately on startup so last_refresh is populated right away
+    await asyncio.sleep(5)
+
     cluster_refresh_state["next_refresh"] = datetime.now(timezone.utc)
 
     while True:
@@ -88,16 +109,21 @@ async def cluster_refresh_task():
 
             cluster_refresh_state["total"] = len(cluster_ids)
 
-            for cid, cname in cluster_ids:
+            async def _wrap(cid, cname):
                 try:
-                    async with AsyncSessionLocal() as session:
-                        svc = ClusterService(session)
-                        await svc.refresh_cluster_status(cid)
-                except Exception as e:
-                    logger.warning(
-                        f"Auto-refresh failed for {cname}: {e}"
+                    await asyncio.wait_for(
+                        _refresh_one_cluster(cid, cname),
+                        timeout=CLUSTER_REFRESH_TIMEOUT,
                     )
+                except asyncio.TimeoutError:
+                    logger.warning(f"Cluster refresh timed out for {cname}")
+                except Exception as e:
+                    logger.warning(f"Cluster refresh error for {cname}: {e}")
                 cluster_refresh_state["completed"] += 1
+
+            await asyncio.gather(
+                *[_wrap(cid, cname) for cid, cname in cluster_ids]
+            )
 
             cluster_refresh_state["last_refresh"] = (
                 datetime.now(timezone.utc)
@@ -140,7 +166,8 @@ async def lifespan(app: FastAPI):
             await t
         except asyncio.CancelledError:
             pass
-    
+
+    _refresh_executor.shutdown(wait=False)
     await engine.dispose()
     logger.info("Shutting down PSAP Control Center...")
 

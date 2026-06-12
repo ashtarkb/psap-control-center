@@ -4,7 +4,7 @@ export default function Results() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Results & Analytics</h1>
+        <h1 className="text-2xl font-bold text-gray-900 font-display">Results & Analytics</h1>
         <p className="mt-1 text-sm text-gray-500">
           View test results and access MLFlow experiments
         </p>

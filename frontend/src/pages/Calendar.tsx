@@ -49,7 +49,7 @@ export default function Calendar() {
   }, [events])
 
   const eventStyleGetter = useCallback((event: { resource: { color: string; status: string } }) => {
-    const backgroundColor = event.resource.color || '#3B82F6'
+    const backgroundColor = event.resource.color || '#0891b2'
     const opacity = event.resource.status === 'cancelled' ? 0.5 : 1
 
     return {
@@ -148,7 +148,7 @@ export default function Calendar() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Calendar</h1>
+        <h1 className="text-2xl font-bold text-gray-900 font-display">Calendar</h1>
         <p className="mt-1 text-sm text-gray-500">
           View cluster reservations across all clusters
         </p>
@@ -196,7 +196,7 @@ export default function Calendar() {
             <div key={cluster.id} className="flex items-center gap-2">
               <div
                 className="h-4 w-4 rounded"
-                style={{ backgroundColor: cluster.color || '#3B82F6' }}
+                style={{ backgroundColor: cluster.color || '#0891b2' }}
               />
               <span className="text-sm text-gray-700">{cluster.name}</span>
             </div>

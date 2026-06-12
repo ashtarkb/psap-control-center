@@ -77,6 +77,7 @@ export interface ResourceUsage {
 }
 
 export type ReservationType = 'cluster' | 'gpu'
+export type ReservationPriority = 'undefined' | 'minor' | 'normal' | 'critical' | 'blocker'
 
 export interface Reservation {
   id: string
@@ -92,12 +93,16 @@ export interface Reservation {
   reservation_type: ReservationType
   gpu_count?: number | null
   enforce_isolation: boolean
+  priority: ReservationPriority
   enforcement_namespace?: string | null
   enforcement_status?: string | null
   purpose?: string
   notes?: string
   color: string
-  status: 'scheduled' | 'active' | 'completed' | 'cancelled'
+  status: 'pending' | 'scheduled' | 'active' | 'completed' | 'cancelled' | 'denied'
+  pending_modification?: Record<string, unknown> | null
+  modification_requested_by?: string | null
+  modification_requested_at?: string | null
   created_at: string
   updated_at: string
 }

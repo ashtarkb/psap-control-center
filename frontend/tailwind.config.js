@@ -8,22 +8,22 @@ export default {
     extend: {
       colors: {
         primary: {
-          50: '#eff6ff',
-          100: '#dbeafe',
-          200: '#bfdbfe',
-          300: '#93c5fd',
-          400: '#60a5fa',
-          500: '#3b82f6',
-          600: '#2563eb',
-          700: '#1d4ed8',
-          800: '#1e40af',
-          900: '#1e3a8a',
-          950: '#172554',
+          50:  '#fff5f5',
+          100: '#ffe0e0',
+          200: '#ffbdbd',
+          300: '#ff8a8a',
+          400: '#ff4d4d',
+          500: '#EE0000',
+          600: '#CC0000',
+          700: '#A30000',
+          800: '#7D0000',
+          900: '#5C0000',
+          950: '#3D0000',
         },
-        redhat: {
-          red: '#EE0000',
-          darkred: '#CC0000',
-        }
+      },
+      fontFamily: {
+        sans: ['"Red Hat Text"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        display: ['"Red Hat Display"', 'ui-sans-serif', 'system-ui', 'sans-serif'],
       },
     },
   },

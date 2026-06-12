@@ -1,3 +1,4 @@
+import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Optional
@@ -192,14 +193,19 @@ class ClusterService:
 
         return True
 
-    async def refresh_cluster_status(self, cluster_id: str) -> Optional[ClusterStatus]:
+    async def _run_in_thread(self, fn, executor=None):
+        """Run a sync function in the given executor (or the default pool)."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(executor, fn)
+
+    async def refresh_cluster_status(self, cluster_id: str, executor=None) -> Optional[ClusterStatus]:
         cluster = await self.get_cluster(cluster_id)
         if not cluster or not cluster.kubeconfig_path:
             return None
 
         try:
             k8s_service = KubernetesService(cluster.kubeconfig_path)
-            cluster_info = k8s_service.get_cluster_info()
+            cluster_info = await self._run_in_thread(k8s_service.get_cluster_info, executor)
 
             cluster.status = cluster_info.get("status", "unknown")
             cluster.node_count = cluster_info.get("node_count")
@@ -208,9 +214,9 @@ class ClusterService:
             cluster.last_health_check = datetime.utcnow()
 
             try:
-                gpu_alloc = k8s_service.get_gpu_allocation()
+                gpu_alloc = await self._run_in_thread(k8s_service.get_gpu_allocation, executor)
                 cluster.gpu_allocation_mode = gpu_alloc.gpu_allocation_mode
-                cluster.gpu_count = gpu_alloc.total_gpus
+                cluster.gpu_count = str(gpu_alloc.total_gpus)
                 cluster.gpu_type = (
                     gpu_alloc.gpu_types[0].product
                     if gpu_alloc.gpu_types else None
@@ -223,8 +229,8 @@ class ClusterService:
             await self.db.commit()
             await self.db.refresh(cluster)
 
-            namespaces = k8s_service.get_namespaces()
-            resource_usage = k8s_service.get_resource_usage()
+            namespaces = await self._run_in_thread(k8s_service.get_namespaces, executor)
+            resource_usage = await self._run_in_thread(k8s_service.get_resource_usage, executor)
 
             return ClusterStatus(
                 status=cluster.status,

@@ -7,13 +7,13 @@ from app.core.database import Base
 
 # Color palette for clusters
 CLUSTER_COLORS = [
-    "#3B82F6",  # Blue
+    "#0891b2",  # Teal
     "#10B981",  # Green
     "#8B5CF6",  # Purple
     "#F97316",  # Orange
-    "#EC4899",  # Pink
-    "#14B8A6",  # Teal
-    "#EF4444",  # Red
+    "#0284c7",  # Sky
+    "#14B8A6",  # Teal-alt
+    "#ea580c",  # Deep Orange
     "#F59E0B",  # Amber
     "#6366F1",  # Indigo
     "#84CC16",  # Lime
@@ -28,7 +28,7 @@ class Cluster(Base):
     description = Column(Text, nullable=True)
     api_server_url = Column(String(512), nullable=True)
     kubeconfig_path = Column(String(512), nullable=False)
-    color = Column(String(7), nullable=False, default="#3B82F6")  # Hex color
+    color = Column(String(7), nullable=False, default="#0891b2")  # Hex color
     
     status = Column(String(50), default="unknown")
     last_health_check = Column(DateTime, nullable=True)

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 
-from app.core.auth import require_auth
+from app.core.auth import require_admin
 from app.core.config import settings
 from app.schemas.hearth import (
     HearthClusterListResponse,
@@ -34,7 +34,7 @@ async def get_hearth_status():
 )
 async def connect_hearth(
     file: UploadFile = File(...),
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_admin),
 ):
     """Upload a kubeconfig for the management cluster to enable Hearth."""
     if not settings.HEARTH_ENABLED:
@@ -80,7 +80,7 @@ async def connect_hearth(
     response_model=HearthConnectResponse,
 )
 async def disconnect_hearth(
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_admin),
 ):
     """Remove the saved Hearth kubeconfig and disconnect."""
     service = get_hearth_service()

@@ -12,9 +12,9 @@ export default function GpuDonutChart({ used, total, size = 80, strokeWidth = 8 
   const filled = total > 0 ? (used / total) * circumference : 0
 
   const color =
-    percent >= 90 ? '#ef4444' :   // red
-    percent >= 70 ? '#f59e0b' :   // amber
-    percent > 0   ? '#8b5cf6' :   // purple
+    percent >= 90 ? '#ea580c' :   // orange (danger)
+    percent >= 70 ? '#f59e0b' :   // amber (caution)
+    percent > 0   ? '#0891b2' :   // teal (healthy)
                     '#d1d5db'     // gray (0%)
 
   return (

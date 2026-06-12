@@ -81,17 +81,17 @@ function TopologyVisualization({
         className={clsx(
           'relative p-4 rounded-xl cursor-pointer transition-all duration-300',
           'bg-slate-900/80 backdrop-blur-sm border',
-          isReady ? borders[variant] : 'border-red-500/50',
+          isReady ? borders[variant] : 'border-orange-500/50',
           isSelected && 'ring-2 ring-offset-2 ring-offset-slate-950',
           isSelected && rings[variant],
-          isReady ? ['hover:shadow-lg', glows[variant]] : 'hover:shadow-lg hover:shadow-red-500/30',
+          isReady ? ['hover:shadow-lg', glows[variant]] : 'hover:shadow-lg hover:shadow-orange-500/30',
           'hover:scale-[1.02] hover:-translate-y-0.5'
         )}
       >
         {/* Glow effect */}
         <div className={clsx(
           'absolute inset-0 rounded-xl opacity-20 blur-xl transition-opacity',
-          isReady ? `bg-gradient-to-br ${gradients[variant]}` : 'bg-red-500',
+          isReady ? `bg-gradient-to-br ${gradients[variant]}` : 'bg-orange-500',
           isSelected ? 'opacity-40' : 'opacity-0 group-hover:opacity-20'
         )} />
         
@@ -106,7 +106,7 @@ function TopologyVisualization({
             )}
             <span className={clsx(
               'relative inline-flex rounded-full h-3 w-3',
-              isReady ? (variant === 'control' ? 'bg-violet-500' : variant === 'worker' ? 'bg-cyan-500' : 'bg-amber-500') : 'bg-red-500'
+              isReady ? (variant === 'control' ? 'bg-violet-500' : variant === 'worker' ? 'bg-cyan-500' : 'bg-amber-500') : 'bg-orange-500'
             )} />
           </span>
         </div>
@@ -346,7 +346,7 @@ function TopologyVisualization({
                     'inline-block mt-2 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider',
                     selectedNode.status === 'Ready' 
                       ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
-                      : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                      : 'bg-orange-500/20 text-orange-400 border border-orange-500/30'
                   )}>
                     {selectedNode.status}
                   </span>
@@ -547,7 +547,7 @@ export default function ClusterDetail() {
           <ArrowLeftIcon className="h-5 w-5 text-gray-500" />
         </Link>
         <div className="flex-1">
-          <h1 className="text-2xl font-bold text-gray-900">{cluster.name}</h1>
+          <h1 className="text-2xl font-bold text-gray-900 font-display">{cluster.name}</h1>
           {cluster.description && (
             <p className="mt-1 text-sm text-gray-500">{cluster.description}</p>
           )}
@@ -590,11 +590,11 @@ export default function ClusterDetail() {
           <div className="flex items-center gap-3">
             <div className={clsx(
               'h-12 w-12 rounded-xl flex items-center justify-center',
-              cluster.status === 'healthy' ? 'bg-green-100' : cluster.status === 'error' ? 'bg-red-100' : 'bg-yellow-100'
+              cluster.status === 'healthy' ? 'bg-green-100' : cluster.status === 'error' ? 'bg-orange-100' : 'bg-yellow-100'
             )}>
               <ServerStackIcon className={clsx(
                 'h-6 w-6',
-                cluster.status === 'healthy' ? 'text-green-600' : cluster.status === 'error' ? 'text-red-600' : 'text-yellow-600'
+                cluster.status === 'healthy' ? 'text-green-600' : cluster.status === 'error' ? 'text-orange-600' : 'text-yellow-600'
               )} />
             </div>
             <div>
@@ -731,7 +731,7 @@ export default function ClusterDetail() {
             {/* Discovery error */}
             {hearthCluster.hardware?.last_error && (
               <div className="mt-4 pt-4 border-t border-gray-100">
-                <div className="flex items-start gap-2 text-sm text-red-600 bg-red-50 p-3 rounded-lg">
+                <div className="flex items-start gap-2 text-sm text-orange-600 bg-orange-50 p-3 rounded-lg">
                   <ExclamationTriangleIcon className="h-4 w-4 mt-0.5 flex-shrink-0" />
                   <div>
                     <p className="font-medium">GPU Discovery Error</p>
@@ -828,7 +828,7 @@ export default function ClusterDetail() {
                     {r.enforcement_status && (
                       <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
                         r.enforcement_status === 'provisioned' ? 'bg-green-100 text-green-800' :
-                        r.enforcement_status === 'error' ? 'bg-red-100 text-red-800' :
+                        r.enforcement_status === 'error' ? 'bg-orange-100 text-orange-800' :
                         'bg-gray-100 text-gray-600'
                       }`}>
                         {r.enforcement_status}

@@ -23,6 +23,7 @@ import toast from 'react-hot-toast'
 import clsx from 'clsx'
 import type { GpuAllocationStatus } from '../types'
 import GpuDonutChart from '../components/GpuDonutChart'
+import { isAdmin } from '../stores/authStore'
 
 function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime()
@@ -268,7 +269,7 @@ export default function Clusters() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Clusters</h1>
+          <h1 className="text-2xl font-bold text-gray-900 font-display">Clusters</h1>
           <div className="mt-1 flex items-center gap-4 text-sm text-gray-500">
             <span>Manage your OCP clusters and their kubeconfigs</span>
             {schedule && (
@@ -300,10 +301,12 @@ export default function Clusters() {
             <ArrowPathIcon className={clsx('h-4 w-4 mr-2', (refreshing || serverRefreshing) && 'animate-spin')} />
             {refreshing ? 'Refreshing...' : serverRefreshing ? 'Auto-refreshing...' : 'Refresh'}
           </button>
-          <button onClick={() => setIsAddOpen(true)} className="btn-primary">
-            <PlusIcon className="h-4 w-4 mr-2" />
-            Add Cluster
-          </button>
+          {isAdmin() && (
+            <button onClick={() => setIsAddOpen(true)} className="btn-primary">
+              <PlusIcon className="h-4 w-4 mr-2" />
+              Add Cluster
+            </button>
+          )}
         </div>
       </div>
 
@@ -384,12 +387,16 @@ export default function Clusters() {
           <ServerStackIcon className="h-16 w-16 mx-auto text-gray-300" />
           <h3 className="mt-4 text-lg font-medium text-gray-900">No clusters configured</h3>
           <p className="mt-2 text-gray-500">
-            Get started by adding your first cluster with its kubeconfig or credentials.
+            {isAdmin()
+              ? 'Get started by adding your first cluster with its kubeconfig or credentials.'
+              : 'No clusters have been configured yet. Contact an admin to add clusters.'}
           </p>
-          <button onClick={() => setIsAddOpen(true)} className="mt-6 btn-primary">
-            <PlusIcon className="h-4 w-4 mr-2" />
-            Add Cluster
-          </button>
+          {isAdmin() && (
+            <button onClick={() => setIsAddOpen(true)} className="mt-6 btn-primary">
+              <PlusIcon className="h-4 w-4 mr-2" />
+              Add Cluster
+            </button>
+          )}
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 xl:grid-cols-3">
@@ -403,7 +410,7 @@ export default function Clusters() {
                         cluster.status === 'healthy'
                           ? 'bg-green-100'
                           : cluster.status === 'error'
-                          ? 'bg-red-100'
+                          ? 'bg-orange-100'
                           : 'bg-yellow-100'
                       }`}
                     >
@@ -412,7 +419,7 @@ export default function Clusters() {
                           cluster.status === 'healthy'
                             ? 'text-green-600'
                             : cluster.status === 'error'
-                            ? 'text-red-600'
+                            ? 'text-orange-600'
                             : 'text-yellow-600'
                         }`}
                       />
@@ -541,14 +548,16 @@ export default function Clusters() {
                   <EyeIcon className="h-4 w-4" />
                   View Details
                 </Link>
-                <button
-                  onClick={() => handleRemove(cluster.id, cluster.name)}
-                  disabled={deleteCluster.isPending}
-                  className="text-sm font-medium text-red-600 hover:text-red-700 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <TrashIcon className="h-4 w-4" />
-                  {deleteCluster.isPending ? 'Removing...' : 'Remove'}
-                </button>
+                {isAdmin() && (
+                  <button
+                    onClick={() => handleRemove(cluster.id, cluster.name)}
+                    disabled={deleteCluster.isPending}
+                    className="text-sm font-medium text-orange-600 hover:text-orange-700 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <TrashIcon className="h-4 w-4" />
+                    {deleteCluster.isPending ? 'Removing...' : 'Remove'}
+                  </button>
+                )}
               </div>
             </div>
           ))}

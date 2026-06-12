@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Boolean, DateTime, Text, ForeignKey, Enum
+from sqlalchemy import Column, String, Integer, Boolean, DateTime, Text, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
@@ -8,10 +8,12 @@ from app.core.database import Base
 
 
 class ReservationStatus(str, enum.Enum):
+    PENDING = "pending"
     SCHEDULED = "scheduled"
     ACTIVE = "active"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+    DENIED = "denied"
 
 
 class ReservationType(str, enum.Enum):
@@ -37,10 +39,11 @@ class Reservation(Base):
     end_time = Column(DateTime, nullable=False, index=True)
 
     status = Column(
-        Enum(ReservationStatus),
-        default=ReservationStatus.SCHEDULED,
+        String(9),
+        default=ReservationStatus.PENDING.value,
         nullable=False
     )
+    priority = Column(String(20), default="normal", nullable=False)
 
     reservation_type = Column(String(20), default="cluster", nullable=False)
     gpu_count = Column(Integer, nullable=True)
@@ -52,7 +55,11 @@ class Reservation(Base):
     purpose = Column(Text, nullable=True)
     notes = Column(Text, nullable=True)
 
-    color = Column(String(7), default="#3B82F6")
+    color = Column(String(7), default="#0891b2")
+
+    pending_modification = Column(Text, nullable=True)
+    modification_requested_by = Column(String(255), nullable=True)
+    modification_requested_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

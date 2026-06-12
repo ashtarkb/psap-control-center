@@ -14,26 +14,17 @@ import { useClusters } from '../hooks/useClusters'
 import { useReservations } from '../hooks/useReservations'
 import { useHearthClusters } from '../hooks/useHearth'
 import { clusterApi } from '../services/api'
-import { format, startOfDay, endOfDay, addDays } from 'date-fns'
+import { format } from 'date-fns'
 import type { HearthCluster, GpuAllocationStatus } from '../types'
 import GpuDonutChart from '../components/GpuDonutChart'
 
 export default function Dashboard() {
   const { data: clustersData, isLoading: clustersLoading } = useClusters()
-  const { data: reservationsData, isLoading: reservationsLoading } = useReservations({
-    start_date: startOfDay(new Date()).toISOString(),
-    end_date: endOfDay(addDays(new Date(), 7)).toISOString(),
-  })
+  const { data: reservationsData, isLoading: reservationsLoading } = useReservations()
   
   const { data: hearthData } = useHearthClusters()
   const hearthClusters = hearthData?.clusters || []
   const hearthAvailable = hearthData?.available ?? false
-
-  // Fetch past reservations (last 30 days)
-  const { data: pastReservationsData, isLoading: pastReservationsLoading } = useReservations({
-    start_date: startOfDay(addDays(new Date(), -30)).toISOString(),
-    end_date: startOfDay(new Date()).toISOString(),
-  })
 
   const clusters = clustersData?.clusters || []
   const reservations = reservationsData?.reservations || []
@@ -91,30 +82,20 @@ export default function Dashboard() {
     },
   ]
 
-  // Separate active and upcoming (scheduled) reservations
+  // Separate active, upcoming (scheduled), and past reservations
   const activeReservationsList = reservations.filter((r) => r.status === 'active')
   const upcomingReservations = reservations
     .filter((r) => r.status === 'scheduled')
     .sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime())
-  
-  // Past reservations (completed or cancelled) - combine from both data sources
-  const allReservations = [
-    ...(pastReservationsData?.reservations || []),
-    ...(reservationsData?.reservations || [])
-  ]
-  // Dedupe by ID and filter for completed/cancelled
-  const pastReservations = allReservations
-    .filter((r, index, self) => 
-      (r.status === 'completed' || r.status === 'cancelled') &&
-      index === self.findIndex((t) => t.id === r.id)
-    )
+  const pastReservations = reservations
+    .filter((r) => r.status === 'completed' || r.status === 'cancelled' || r.status === 'denied')
     .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+          <h1 className="text-2xl font-bold text-gray-900 font-display">Dashboard</h1>
           <p className="mt-1 text-sm text-gray-500">
             Overview of your cluster infrastructure and reservations
           </p>
@@ -234,7 +215,7 @@ export default function Dashboard() {
                           cluster.status === 'healthy'
                             ? 'bg-green-500'
                             : cluster.status === 'error'
-                            ? 'bg-red-500'
+                            ? 'bg-orange-500'
                             : 'bg-yellow-500'
                         }`}
                       />
@@ -328,7 +309,7 @@ export default function Dashboard() {
                             {reservation.enforcement_status && (
                               <span className={`ml-1 px-1 py-0.5 rounded text-[9px] font-medium ${
                                 reservation.enforcement_status === 'provisioned' ? 'bg-green-100 text-green-800' :
-                                reservation.enforcement_status === 'error' ? 'bg-red-100 text-red-800' :
+                                reservation.enforcement_status === 'error' ? 'bg-orange-100 text-orange-800' :
                                 'bg-gray-100 text-gray-600'
                               }`}>
                                 {reservation.enforcement_status}
@@ -415,7 +396,7 @@ export default function Dashboard() {
                           <span className="text-sm font-medium text-gray-900">{hc.gpu_summary}</span>
                         </div>
                       ) : hc.hardware?.last_error ? (
-                        <div className="flex items-center gap-1 text-sm text-red-600">
+                        <div className="flex items-center gap-1 text-sm text-orange-600">
                           <ExclamationTriangleIcon className="h-4 w-4" />
                           Discovery error
                         </div>
@@ -575,7 +556,7 @@ export default function Dashboard() {
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
-              {pastReservationsLoading ? (
+              {reservationsLoading ? (
                 <tr>
                   <td colSpan={5} className="px-6 py-8 text-center text-gray-500">
                     Loading...

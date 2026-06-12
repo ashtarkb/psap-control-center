@@ -7,9 +7,11 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
+  storageClassName: ocs-storagecluster-cephfs
+  volumeMode: Filesystem
   resources:
     requests:
-      storage: 1Gi
+      storage: 2Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -20,6 +22,8 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
+  storageClassName: ocs-storagecluster-cephfs
+  volumeMode: Filesystem
   resources:
     requests:
-      storage: 100Mi
+      storage: 1Gi

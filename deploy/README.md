@@ -101,7 +101,9 @@ oc new-project psap-control-center
 ```bash
 oc create secret generic psap-control-center-admin \
   --from-literal=ADMIN_USERNAME=admin \
-  --from-literal=ADMIN_PASSWORD='<pick-a-secure-password>'
+  --from-literal=ADMIN_PASSWORD='<pick-a-secure-password>' \
+  --from-literal=USER_USERNAME=user \
+  --from-literal=USER_PASSWORD='<pick-a-secure-password>'
 
 oc create secret generic psap-control-center-config \
   --from-literal=SECRET_KEY='<random-string>' \
@@ -203,17 +205,27 @@ oc rollout restart deployment/psap-control-center-frontend
 
 ## Authentication
 
-- **Viewing** (all GET endpoints): No authentication required
-- **Modifying** (create, edit, delete): Requires sign-in with the admin
-  credentials stored in the `psap-control-center-admin` secret
+Authentication uses HttpOnly session cookies (JWT). Two role-based accounts
+are configured via environment variables:
 
-## Updating the Admin Password
+| Role    | Env Vars                              | Permissions |
+| ------- | ------------------------------------- | ----------- |
+| `admin` | `ADMIN_USERNAME` / `ADMIN_PASSWORD`   | Full access: cluster management, reservations, Hearth |
+| `user`  | `USER_USERNAME` / `USER_PASSWORD`     | View all data, create/cancel own reservations |
+
+All GET endpoints remain open (no authentication required).
+
+Sessions expire after 24 hours (configurable via `ACCESS_TOKEN_EXPIRE_MINUTES`).
+
+## Updating Credentials
 
 ```bash
 oc delete secret psap-control-center-admin
 oc create secret generic psap-control-center-admin \
   --from-literal=ADMIN_USERNAME=admin \
-  --from-literal=ADMIN_PASSWORD='<new-password>'
+  --from-literal=ADMIN_PASSWORD='<new-password>' \
+  --from-literal=USER_USERNAME=user \
+  --from-literal=USER_PASSWORD='<new-password>'
 
 oc rollout restart deployment/psap-control-center-backend
 ```

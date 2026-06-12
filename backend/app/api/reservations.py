@@ -1,11 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+import json
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
 from datetime import datetime
 
 from app.core.database import get_db
-from app.core.auth import require_auth
+from app.core.auth import require_auth, require_admin
 from app.services.reservation_service import ReservationService
+from app.services.slack_notifier import (
+    send_new_reservation_notification,
+    send_modification_request_notification,
+)
 from app.models.reservation import ReservationStatus
 from app.schemas.reservation import (
     ReservationCreate,
@@ -14,6 +19,8 @@ from app.schemas.reservation import (
     ReservationListResponse,
     CalendarEvent,
     ClusterOccupancyResponse,
+    DenyAction,
+    ModificationRequestCreate,
 )
 from app.utils.logger import create_logger
 
@@ -26,6 +33,13 @@ def _to_response(r, cluster_name_override: Optional[str] = None) -> ReservationR
     cluster_name = cluster_name_override or r.cluster_name or (
         r.cluster.name if r.cluster else None
     )
+    pending_mod = None
+    if r.pending_modification:
+        try:
+            pending_mod = json.loads(r.pending_modification)
+        except (json.JSONDecodeError, TypeError):
+            pending_mod = None
+
     return ReservationResponse(
         id=r.id,
         title=r.title,
@@ -41,10 +55,14 @@ def _to_response(r, cluster_name_override: Optional[str] = None) -> ReservationR
         gpu_count=r.gpu_count,
         enforcement_namespace=r.enforcement_namespace,
         enforcement_status=r.enforcement_status,
+        priority=r.priority or "normal",
         purpose=r.purpose,
         notes=r.notes,
         color=r.color,
-        status=r.status,
+        status=r.status.lower() if r.status else r.status,
+        pending_modification=pending_mod,
+        modification_requested_by=r.modification_requested_by,
+        modification_requested_at=r.modification_requested_at,
         created_at=r.created_at,
         updated_at=r.updated_at,
     )
@@ -89,13 +107,15 @@ async def list_reservations(
 @router.post("", response_model=ReservationResponse, status_code=201)
 async def create_reservation(
     reservation_data: ReservationCreate,
-    _user: str = Depends(require_auth),
+    background_tasks: BackgroundTasks,
+    _user: dict = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
     service = ReservationService(db)
 
     try:
         reservation = await service.create_reservation(reservation_data)
+        background_tasks.add_task(send_new_reservation_notification, reservation)
         return _to_response(reservation)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -175,7 +195,7 @@ async def get_reservation(
 async def update_reservation(
     reservation_id: str,
     reservation_data: ReservationUpdate,
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
     service = ReservationService(db)
@@ -193,7 +213,7 @@ async def update_reservation(
 @router.delete("/{reservation_id}", status_code=204)
 async def delete_reservation(
     reservation_id: str,
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
     service = ReservationService(db)
@@ -206,13 +226,149 @@ async def delete_reservation(
 @router.post("/{reservation_id}/cancel", response_model=ReservationResponse)
 async def cancel_reservation(
     reservation_id: str,
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
     service = ReservationService(db)
-    reservation = await service.cancel_reservation(reservation_id, cancelled_by=_user)
+    existing = await service.get_reservation(reservation_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Reservation not found")
+    is_owner = existing.user_name == _user["username"]
+    if _user["role"] != "admin" and not is_owner:
+        raise HTTPException(
+            status_code=403,
+            detail="Not authorized to cancel this reservation",
+        )
+
+    reservation = await service.cancel_reservation(
+        reservation_id, cancelled_by=_user["username"]
+    )
 
     if not reservation:
-        raise HTTPException(status_code=404, detail="Reservation not found")
+        raise HTTPException(
+            status_code=404, detail="Reservation not found"
+        )
 
     return _to_response(reservation)
+
+
+@router.post(
+    "/{reservation_id}/approve", response_model=ReservationResponse
+)
+async def approve_reservation(
+    reservation_id: str,
+    _user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ReservationService(db)
+    try:
+        reservation = await service.approve_reservation(
+            reservation_id, approved_by=_user["username"]
+        )
+        if not reservation:
+            raise HTTPException(
+                status_code=404, detail="Reservation not found"
+            )
+        return _to_response(reservation)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/{reservation_id}/deny", response_model=ReservationResponse
+)
+async def deny_reservation(
+    reservation_id: str,
+    body: DenyAction = DenyAction(),
+    _user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ReservationService(db)
+    try:
+        reservation = await service.deny_reservation(
+            reservation_id,
+            denied_by=_user["username"],
+            reason=body.reason,
+        )
+        if not reservation:
+            raise HTTPException(
+                status_code=404, detail="Reservation not found"
+            )
+        return _to_response(reservation)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/{reservation_id}/request-modification",
+    response_model=ReservationResponse,
+)
+async def request_modification(
+    reservation_id: str,
+    body: ModificationRequestCreate,
+    background_tasks: BackgroundTasks,
+    _user: dict = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ReservationService(db)
+    changes = body.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=400, detail="No changes provided")
+
+    try:
+        reservation = await service.request_modification(
+            reservation_id, changes, requested_by=_user["username"]
+        )
+        if not reservation:
+            raise HTTPException(status_code=404, detail="Reservation not found")
+        background_tasks.add_task(
+            send_modification_request_notification, reservation, changes
+        )
+        return _to_response(reservation)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/{reservation_id}/approve-modification",
+    response_model=ReservationResponse,
+)
+async def approve_modification(
+    reservation_id: str,
+    _user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ReservationService(db)
+    try:
+        reservation = await service.approve_modification(
+            reservation_id, approved_by=_user["username"]
+        )
+        if not reservation:
+            raise HTTPException(status_code=404, detail="Reservation not found")
+        return _to_response(reservation)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post(
+    "/{reservation_id}/deny-modification",
+    response_model=ReservationResponse,
+)
+async def deny_modification(
+    reservation_id: str,
+    body: DenyAction = DenyAction(),
+    _user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ReservationService(db)
+    try:
+        reservation = await service.deny_modification(
+            reservation_id,
+            denied_by=_user["username"],
+            reason=body.reason,
+        )
+        if not reservation:
+            raise HTTPException(status_code=404, detail="Reservation not found")
+        return _to_response(reservation)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

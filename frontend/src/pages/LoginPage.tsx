@@ -7,7 +7,7 @@ import {
 } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { authApi } from '../services/api'
-import { setCredentials } from '../stores/authStore'
+import { setSession } from '../stores/authStore'
 
 const features = [
   {
@@ -43,9 +43,9 @@ export default function LoginPage() {
 
     setLoading(true)
     try {
-      await authApi.check(username, password)
-      setCredentials({ username, password })
-      toast.success('Welcome back, ' + username)
+      const session = await authApi.login(username, password)
+      setSession(session)
+      toast.success('Welcome back, ' + session.username)
     } catch {
       toast.error('Invalid credentials')
     } finally {
@@ -70,14 +70,14 @@ export default function LoginPage() {
                 <span className="text-white font-bold text-2xl">P</span>
               </div>
               <div>
-                <h1 className="text-2xl font-bold text-white">PSAP Control Center</h1>
+                <h1 className="text-2xl font-bold text-white font-display">PSAP Control Center</h1>
                 <p className="text-primary-200 text-sm">Performance & Scale for AI Platforms</p>
               </div>
             </div>
           </div>
 
           <div className="space-y-6">
-            <h2 className="text-3xl font-bold text-white leading-tight">
+            <h2 className="text-3xl font-bold text-white leading-tight font-display">
               Manage your GPU<br />infrastructure with confidence
             </h2>
             <p className="text-primary-200 text-lg max-w-md">
@@ -105,27 +105,27 @@ export default function LoginPage() {
       </div>
 
       {/* Right panel - login form */}
-      <div className="flex-1 flex items-center justify-center px-6 py-12 bg-gray-50">
+      <div className="flex-1 flex items-center justify-center px-6 py-12 bg-[#151515]">
         <div className="w-full max-w-sm">
           {/* Mobile branding */}
           <div className="lg:hidden flex flex-col items-center mb-8">
-            <div className="h-14 w-14 rounded-xl bg-gradient-to-br from-primary-600 to-primary-700 flex items-center justify-center shadow-lg shadow-primary-500/20 mb-4">
+            <div className="h-14 w-14 rounded-xl bg-primary-600 flex items-center justify-center shadow-lg mb-4">
               <span className="text-white font-bold text-2xl">P</span>
             </div>
-            <h1 className="text-2xl font-bold text-gray-900">PSAP Control Center</h1>
-            <p className="text-sm text-gray-500 mt-1">Performance & Scale for AI Platforms</p>
+            <h1 className="text-2xl font-bold text-white font-display">PSAP Control Center</h1>
+            <p className="text-sm text-gray-400 mt-1">Performance & Scale for AI Platforms</p>
           </div>
 
           <div className="text-center lg:text-left mb-8">
-            <h2 className="text-2xl font-bold text-gray-900">Welcome back</h2>
-            <p className="mt-2 text-sm text-gray-600">
+            <h2 className="text-2xl font-bold text-white font-display">Welcome back</h2>
+            <p className="mt-2 text-sm text-gray-400">
               Sign in to access cluster management and GPU reservations.
             </p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>
-              <label htmlFor="login-username" className="block text-sm font-medium text-gray-700 mb-1">
+              <label htmlFor="login-username" className="block text-sm font-medium text-gray-300 mb-1">
                 Username
               </label>
               <input
@@ -135,13 +135,13 @@ export default function LoginPage() {
                 required
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                className="block w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm shadow-sm placeholder:text-gray-400 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 transition-colors"
+                className="block w-full rounded-lg border border-white/20 bg-white/5 px-3.5 py-2.5 text-sm text-white shadow-sm placeholder:text-gray-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 transition-colors"
                 placeholder="Enter your username"
               />
             </div>
 
             <div>
-              <label htmlFor="login-password" className="block text-sm font-medium text-gray-700 mb-1">
+              <label htmlFor="login-password" className="block text-sm font-medium text-gray-300 mb-1">
                 Password
               </label>
               <input
@@ -151,7 +151,7 @@ export default function LoginPage() {
                 required
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="block w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm shadow-sm placeholder:text-gray-400 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 transition-colors"
+                className="block w-full rounded-lg border border-white/20 bg-white/5 px-3.5 py-2.5 text-sm text-white shadow-sm placeholder:text-gray-500 focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 transition-colors"
                 placeholder="Enter your password"
               />
             </div>
@@ -159,7 +159,7 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full rounded-lg bg-primary-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:opacity-50 transition-all duration-200"
+              className="w-full rounded-lg bg-primary-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:ring-offset-[#151515] disabled:opacity-50 transition-all duration-200"
             >
               {loading ? (
                 <span className="flex items-center justify-center gap-2">
@@ -175,7 +175,7 @@ export default function LoginPage() {
             </button>
           </form>
 
-          <p className="mt-8 text-center text-xs text-gray-400">
+          <p className="mt-8 text-center text-xs text-gray-500">
             Contact your administrator if you need access.
           </p>
         </div>

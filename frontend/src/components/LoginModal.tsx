@@ -3,7 +3,7 @@ import { Dialog, Transition } from '@headlessui/react'
 import { LockClosedIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { authApi } from '../services/api'
-import { setCredentials } from '../stores/authStore'
+import { setSession } from '../stores/authStore'
 
 interface LoginModalProps {
   open: boolean
@@ -21,8 +21,8 @@ export default function LoginModal({ open, onClose }: LoginModalProps) {
 
     setLoading(true)
     try {
-      await authApi.check(username, password)
-      setCredentials({ username, password })
+      const session = await authApi.login(username, password)
+      setSession(session)
       toast.success('Logged in successfully')
       setUsername('')
       setPassword('')

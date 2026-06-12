@@ -2,59 +2,43 @@ import { createLogger } from '../utils/logger'
 
 const logger = createLogger('AuthStore')
 
-const STORAGE_KEY = 'psap_auth'
+export type UserRole = 'admin' | 'user'
 
-export interface AuthCredentials {
+export interface AuthSession {
   username: string
-  password: string
+  role: UserRole
 }
 
-let credentials: AuthCredentials | null = null
+let session: AuthSession | null = null
 
-function loadFromStorage(): AuthCredentials | null {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY)
-    if (stored) return JSON.parse(stored)
-  } catch {
-    // ignore parse errors
-  }
-  return null
-}
-
-credentials = loadFromStorage()
-
-if (typeof window !== 'undefined') {
-  window.addEventListener('storage', (event) => {
-    if (event.key === STORAGE_KEY) {
-      credentials = loadFromStorage()
-      window.dispatchEvent(new Event('auth-change'))
-    }
-  })
-}
-
-export function getCredentials(): AuthCredentials | null {
-  return credentials
+export function getSession(): AuthSession | null {
+  return session
 }
 
 export function isAuthenticated(): boolean {
-  return credentials !== null
+  return session !== null
 }
 
-export function getBasicAuthHeader(): string | null {
-  if (!credentials) return null
-  return 'Basic ' + btoa(`${credentials.username}:${credentials.password}`)
+export function isAdmin(): boolean {
+  return session?.role === 'admin'
 }
 
-export function setCredentials(creds: AuthCredentials): void {
-  credentials = creds
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(creds))
-  logger.info('User authenticated:', creds.username)
+export function getUsername(): string | null {
+  return session?.username ?? null
+}
+
+export function getRole(): UserRole | null {
+  return session?.role ?? null
+}
+
+export function setSession(user: AuthSession): void {
+  session = user
+  logger.info('User authenticated:', user.username, `(${user.role})`)
   window.dispatchEvent(new Event('auth-change'))
 }
 
-export function clearCredentials(): void {
-  credentials = null
-  localStorage.removeItem(STORAGE_KEY)
+export function clearSession(): void {
+  session = null
   logger.info('User logged out')
   window.dispatchEvent(new Event('auth-change'))
 }

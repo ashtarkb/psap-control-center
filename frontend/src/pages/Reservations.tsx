@@ -19,14 +19,21 @@ import {
 import {
   useReservations,
   useCreateReservation,
+  useUpdateReservation,
   useDeleteReservation,
   useCancelReservation,
+  useApproveReservation,
+  useDenyReservation,
+  useRequestModification,
+  useApproveModification,
+  useDenyModification,
 } from '../hooks/useReservations'
 import { useClusters } from '../hooks/useClusters'
 import { useGpuStatus } from '../hooks/useGpuStatus'
 import toast from 'react-hot-toast'
 import clsx from 'clsx'
-import type { ReservationType } from '../types'
+import type { Reservation, ReservationType, ReservationPriority } from '../types'
+import { isAdmin, getUsername } from '../stores/authStore'
 
 const initialFormState = {
   cluster_id: '',
@@ -41,7 +48,16 @@ const initialFormState = {
   reservation_type: 'cluster' as ReservationType,
   gpu_count: '' as string,
   enforce_isolation: false,
+  priority: 'normal' as ReservationPriority,
 }
+
+const PRIORITY_OPTIONS: { value: ReservationPriority; label: string }[] = [
+  { value: 'undefined', label: 'Undefined' },
+  { value: 'minor', label: 'Minor' },
+  { value: 'normal', label: 'Normal' },
+  { value: 'critical', label: 'Critical' },
+  { value: 'blocker', label: 'Blocker' },
+]
 
 interface WeekCalendarReservation {
   start_time: string
@@ -55,7 +71,7 @@ interface WeekCalendarReservation {
   gpu_count?: number | null
 }
 
-function WeekCalendar({ reservations }: { reservations: WeekCalendarReservation[] }) {
+function WeekCalendar({ reservations, onReservationClick }: { reservations: WeekCalendarReservation[]; onReservationClick?: (r: WeekCalendarReservation) => void }) {
   const [currentWeekStart, setCurrentWeekStart] = useState(startOfWeek(new Date()))
   
   // Get all days in the week
@@ -195,12 +211,13 @@ function WeekCalendar({ reservations }: { reservations: WeekCalendarReservation[
                             {slotReservations.map((res, idx) => {
                               const showLabel = isReservationStart(date, hour, res)
                               const opacityHex = ['40', '60', '80', 'A0', 'C0'][idx % 5]
-                              const color = res.color || '#3B82F6'
+                              const color = res.color || '#0891b2'
                               return (
                                 <div
                                   key={idx}
-                                  className="flex-1 flex items-center justify-center overflow-hidden border-r border-white/50 last:border-r-0"
+                                  className="flex-1 flex items-center justify-center overflow-hidden border-r border-white/50 last:border-r-0 cursor-pointer"
                                   style={{ backgroundColor: `${color}${opacityHex}` }}
+                                  onClick={() => onReservationClick?.(res)}
                                 >
                                   {showLabel && slotReservations.length <= 2 && (
                                     <span 
@@ -223,13 +240,14 @@ function WeekCalendar({ reservations }: { reservations: WeekCalendarReservation[
                         ) : (
                           // Single reservation
                           <div 
-                            className="absolute inset-0 flex items-center px-1"
-                            style={{ backgroundColor: `${slotReservations[0].color || '#3B82F6'}30` }}
+                            className="absolute inset-0 flex items-center px-1 cursor-pointer"
+                            style={{ backgroundColor: `${slotReservations[0].color || '#0891b2'}30` }}
+                            onClick={() => onReservationClick?.(slotReservations[0])}
                           >
                             {isReservationStart(date, hour, slotReservations[0]) && (
                               <span 
                                 className="text-[10px] font-medium truncate"
-                                style={{ color: slotReservations[0].color || '#3B82F6' }}
+                                style={{ color: slotReservations[0].color || '#0891b2' }}
                               >
                                 {slotReservations[0].title}
                               </span>
@@ -282,7 +300,7 @@ function EnforcementStatusBadge({ status }: { status?: string | null }) {
   if (!status) return null
   const styles: Record<string, string> = {
     provisioned: 'bg-green-100 text-green-800',
-    error: 'bg-red-100 text-red-800',
+    error: 'bg-orange-100 text-orange-800',
     cleaned: 'bg-gray-100 text-gray-600',
   }
   return (
@@ -307,21 +325,84 @@ function ReservationTypeBadge({ reservation }: { reservation: { reservation_type
   )
 }
 
+function PriorityBadge({ priority }: { priority?: string }) {
+  const p = priority || 'normal'
+  const styles: Record<string, string> = {
+    blocker: 'bg-orange-100 text-orange-800',
+    critical: 'bg-yellow-100 text-yellow-800',
+    normal: 'bg-purple-100 text-purple-800',
+    minor: 'bg-gray-100 text-gray-600',
+    undefined: 'bg-gray-50 text-gray-400',
+  }
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium capitalize ${styles[p] || styles.normal}`}>
+      {p}
+    </span>
+  )
+}
+
+function ModificationBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800 border border-amber-200">
+      <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+      Modify Requested
+    </span>
+  )
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const styles: Record<string, string> = {
+    pending: 'bg-amber-100 text-amber-800',
+    scheduled: 'bg-purple-100 text-purple-800',
+    active: 'bg-green-100 text-green-800',
+    completed: 'bg-gray-100 text-gray-600',
+    cancelled: 'bg-gray-100 text-gray-600',
+    denied: 'bg-orange-100 text-orange-800',
+  }
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium capitalize ${styles[status] || 'bg-gray-100 text-gray-600'}`}>
+      {status}
+    </span>
+  )
+}
+
 export default function Reservations() {
   const [isOpen, setIsOpen] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
   const [form, setForm] = useState(initialFormState)
   const [selectedCluster, setSelectedCluster] = useState<{ id: string; name: string } | null>(null)
 
   const { data: reservationsData, isLoading: reservationsLoading } = useReservations()
   const { data: clustersData } = useClusters()
+  const [viewReservation, setViewReservation] = useState<Reservation | null>(null)
+  const [denyDialogId, setDenyDialogId] = useState<string | null>(null)
+  const [denyReason, setDenyReason] = useState('')
+
   const createReservation = useCreateReservation()
+  const updateReservation = useUpdateReservation()
   const deleteReservation = useDeleteReservation()
   const cancelReservation = useCancelReservation()
+  const approveReservation = useApproveReservation()
+  const denyReservation = useDenyReservation()
+  const requestModification = useRequestModification()
+  const approveModification = useApproveModification()
+  const denyModification = useDenyModification()
+  const [isModifyRequest, setIsModifyRequest] = useState(false)
+  const [modifyTargetId, setModifyTargetId] = useState<string | null>(null)
 
   const reservations = reservationsData?.reservations || []
   const clusters = clustersData?.clusters || []
 
   // Split reservations into categories
+  const pendingReservations = reservations
+    .filter((r) => r.status === 'pending' || r.pending_modification)
+    .sort((a, b) => {
+      const priorityOrder = { blocker: 0, critical: 1, normal: 2, minor: 3, undefined: 4 }
+      const pa = priorityOrder[(a.priority || 'normal') as keyof typeof priorityOrder] ?? 2
+      const pb = priorityOrder[(b.priority || 'normal') as keyof typeof priorityOrder] ?? 2
+      return pa !== pb ? pa - pb : new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    })
+
   const activeReservations = reservations
     .filter((r) => r.status === 'active')
     .sort((a, b) => new Date(a.end_time).getTime() - new Date(b.end_time).getTime())
@@ -331,8 +412,8 @@ export default function Reservations() {
     .sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime())
   
   const pastReservations = reservations
-    .filter((r) => r.status === 'completed' || r.status === 'cancelled')
-    .sort((a, b) => new Date(b.end_time).getTime() - new Date(a.end_time).getTime())
+    .filter((r) => r.status === 'completed' || r.status === 'cancelled' || r.status === 'denied')
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
 
   const selectedClusterData = clusters.find(c => c.id === selectedCluster?.id)
   const { data: gpuStatus } = useGpuStatus(selectedCluster?.id, !!selectedCluster)
@@ -361,6 +442,7 @@ export default function Reservations() {
       reservation_type: form.reservation_type,
       gpu_count: form.reservation_type === 'gpu' ? parseInt(form.gpu_count) : undefined,
       enforce_isolation: form.reservation_type === 'gpu' ? form.enforce_isolation : false,
+      priority: form.priority,
     })
 
     setIsOpen(false)
@@ -380,23 +462,155 @@ export default function Reservations() {
     }
   }
 
+  const handleRequestModify = (reservation: typeof reservations[0]) => {
+    handleEdit(reservation)
+    setIsModifyRequest(true)
+    setModifyTargetId(reservation.id)
+  }
+
+  const handleSubmitModificationRequest = async () => {
+    if (!modifyTargetId) return
+    if (!form.title || !form.start_time || !form.end_time) {
+      toast.error('Please fill in all required fields')
+      return
+    }
+    if (form.reservation_type === 'gpu' && (!form.gpu_count || parseInt(form.gpu_count) < 1)) {
+      toast.error('GPU count must be at least 1')
+      return
+    }
+
+    const changes: Record<string, unknown> = {}
+    const original = reservations.find(r => r.id === modifyTargetId)
+    if (!original) return
+
+    if (form.title !== original.title) changes.title = form.title
+    if (form.description !== (original.description || '')) changes.description = form.description || undefined
+    if (new Date(form.start_time).toISOString() !== original.start_time) changes.start_time = new Date(form.start_time).toISOString()
+    if (new Date(form.end_time).toISOString() !== original.end_time) changes.end_time = new Date(form.end_time).toISOString()
+    if (form.purpose !== (original.purpose || '')) changes.purpose = form.purpose || undefined
+    if (form.reservation_type !== original.reservation_type) changes.reservation_type = form.reservation_type
+    if (form.reservation_type === 'gpu' && parseInt(form.gpu_count) !== (original.gpu_count ?? 0)) changes.gpu_count = parseInt(form.gpu_count)
+    if (form.enforce_isolation !== original.enforce_isolation) changes.enforce_isolation = form.enforce_isolation
+    if (form.priority !== original.priority) changes.priority = form.priority
+
+    if (Object.keys(changes).length === 0) {
+      toast.error('No changes detected')
+      return
+    }
+
+    await requestModification.mutateAsync({ id: modifyTargetId, changes })
+    closeModal()
+  }
+
+  const handleEdit = (reservation: typeof reservations[0]) => {
+    const toLocalDatetime = (iso: string) => {
+      const d = new Date(iso)
+      const pad = (n: number) => n.toString().padStart(2, '0')
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+    }
+
+    const cluster = clusters.find(c => c.id === reservation.cluster_id)
+    setSelectedCluster(cluster ? { id: cluster.id, name: cluster.name } : null)
+    setForm({
+      cluster_id: reservation.cluster_id || '',
+      title: reservation.title,
+      description: reservation.description || '',
+      user_name: reservation.user_name,
+      user_email: reservation.user_email || '',
+      team: reservation.team || '',
+      start_time: toLocalDatetime(reservation.start_time),
+      end_time: toLocalDatetime(reservation.end_time),
+      purpose: reservation.purpose || '',
+      reservation_type: reservation.reservation_type || 'cluster',
+      gpu_count: reservation.gpu_count?.toString() || '',
+      enforce_isolation: reservation.enforce_isolation ?? false,
+      priority: reservation.priority || 'normal',
+    })
+    setEditingId(reservation.id)
+    setIsOpen(true)
+  }
+
+  const handleUpdate = async () => {
+    if (!editingId) return
+    if (!form.cluster_id || !form.title || !form.user_name || !form.start_time || !form.end_time) {
+      toast.error('Please fill in all required fields')
+      return
+    }
+    if (form.reservation_type === 'gpu' && (!form.gpu_count || parseInt(form.gpu_count) < 1)) {
+      toast.error('GPU count must be at least 1')
+      return
+    }
+
+    await updateReservation.mutateAsync({
+      id: editingId,
+      data: {
+        cluster_id: form.cluster_id,
+        title: form.title,
+        description: form.description || undefined,
+        user_name: form.user_name,
+        user_email: form.user_email || undefined,
+        team: form.team || undefined,
+        start_time: new Date(form.start_time).toISOString(),
+        end_time: new Date(form.end_time).toISOString(),
+        purpose: form.purpose || undefined,
+        reservation_type: form.reservation_type,
+        gpu_count: form.reservation_type === 'gpu' ? parseInt(form.gpu_count) : undefined,
+        enforce_isolation: form.reservation_type === 'gpu' ? form.enforce_isolation : false,
+        priority: form.priority,
+      },
+    })
+
+    setIsOpen(false)
+    setEditingId(null)
+    setForm(initialFormState)
+    setSelectedCluster(null)
+  }
+
+  const handleApprove = async (id: string) => {
+    await approveReservation.mutateAsync(id)
+  }
+
+  const handleDenyConfirm = async () => {
+    if (!denyDialogId) return
+    await denyReservation.mutateAsync({ id: denyDialogId, reason: denyReason || undefined })
+    setDenyDialogId(null)
+    setDenyReason('')
+  }
+
+  const closeModal = () => {
+    setIsOpen(false)
+    setEditingId(null)
+    setIsModifyRequest(false)
+    setModifyTargetId(null)
+    setForm(initialFormState)
+    setSelectedCluster(null)
+  }
+
   return (
     <div className="space-y-6">
       {/* Week Calendar - Centered */}
       <div className="flex justify-center">
         <div className="w-full max-w-4xl">
-          <WeekCalendar reservations={reservations} />
+          <WeekCalendar
+            reservations={reservations}
+            onReservationClick={(calRes) => {
+              const match = reservations.find(
+                (r) => r.title === calRes.title && r.start_time === calRes.start_time && r.end_time === calRes.end_time
+              )
+              if (match) setViewReservation(match)
+            }}
+          />
         </div>
       </div>
 
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Reservations</h1>
+          <h1 className="text-2xl font-bold text-gray-900 font-display">Reservations</h1>
           <p className="mt-1 text-sm text-gray-500">
             Manage cluster reservations and time slots
           </p>
         </div>
-        <button onClick={() => setIsOpen(true)} className="btn-primary">
+        <button onClick={() => { setEditingId(null); setForm(initialFormState); setSelectedCluster(null); setIsOpen(true) }} className="btn-primary">
           <PlusIcon className="h-4 w-4 mr-2" />
           New Reservation
         </button>
@@ -411,13 +625,172 @@ export default function Reservations() {
           <CalendarDaysIcon className="h-16 w-16 mx-auto text-gray-300" />
           <h3 className="mt-4 text-lg font-medium text-gray-900">No reservations yet</h3>
           <p className="mt-2 text-gray-500">Create your first reservation to get started.</p>
-          <button onClick={() => setIsOpen(true)} className="mt-6 btn-primary">
+          <button onClick={() => { setEditingId(null); setForm(initialFormState); setSelectedCluster(null); setIsOpen(true) }} className="mt-6 btn-primary">
             <PlusIcon className="h-4 w-4 mr-2" />
             New Reservation
           </button>
         </div>
       ) : (
         <div className="space-y-6">
+          {/* Pending Approval — admin only */}
+          {isAdmin() && pendingReservations.length > 0 && (
+            <div className="card border-l-4 border-l-amber-500 overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-200 bg-amber-50">
+                <div className="flex items-center gap-2">
+                  <span className="relative flex h-3 w-3">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
+                  </span>
+                  <h2 className="text-lg font-semibold text-gray-900">Pending Approval ({pendingReservations.length})</h2>
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reservation</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cluster</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Priority</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User / Team</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Requested Time</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {pendingReservations.map((reservation) => {
+                      const isModReq = !!reservation.pending_modification
+                      return (
+                      <tr key={reservation.id} className="hover:bg-amber-50/30 cursor-pointer" onClick={() => setViewReservation(reservation)}>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-2">
+                            <div className="w-1 h-8 rounded-full" style={{ backgroundColor: reservation.color || '#F59E0B' }} />
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <div className="text-sm font-medium text-gray-900">{reservation.title}</div>
+                                {isModReq && <ModificationBadge />}
+                              </div>
+                              {reservation.purpose && <div className="text-xs text-gray-500 truncate max-w-[200px]">{reservation.purpose}</div>}
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-700">{reservation.cluster_name || 'Unknown'}</td>
+                        <td className="px-4 py-3"><ReservationTypeBadge reservation={reservation} /></td>
+                        <td className="px-4 py-3"><PriorityBadge priority={reservation.priority} /></td>
+                        <td className="px-4 py-3">
+                          <div className="text-sm text-gray-900">
+                            {isModReq ? (reservation.modification_requested_by || reservation.user_name) : reservation.user_name}
+                          </div>
+                          {reservation.team && <div className="text-xs text-gray-500">{reservation.team}</div>}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-gray-500">
+                          <div>{format(new Date(reservation.start_time), 'MMM d, yyyy h:mm a')}</div>
+                          <div className="text-gray-400">to {format(new Date(reservation.end_time), 'MMM d, yyyy h:mm a')}</div>
+                        </td>
+                        <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex items-center justify-end gap-1.5">
+                            {isModReq ? (
+                              <>
+                                <button
+                                  onClick={() => approveModification.mutateAsync(reservation.id)}
+                                  disabled={approveModification.isPending}
+                                  className="px-2.5 py-1 text-xs font-medium rounded-md bg-green-600 text-white hover:bg-green-700 transition-colors"
+                                >
+                                  Approve
+                                </button>
+                                <button
+                                  onClick={() => denyModification.mutateAsync({ id: reservation.id })}
+                                  disabled={denyModification.isPending}
+                                  className="px-2.5 py-1 text-xs font-medium rounded-md bg-orange-600 text-white hover:bg-orange-700 transition-colors"
+                                >
+                                  Deny
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  onClick={() => handleApprove(reservation.id)}
+                                  disabled={approveReservation.isPending}
+                                  className="px-2.5 py-1 text-xs font-medium rounded-md bg-green-600 text-white hover:bg-green-700 transition-colors"
+                                >
+                                  Approve
+                                </button>
+                                <button
+                                  onClick={() => { setDenyDialogId(reservation.id); setDenyReason('') }}
+                                  className="px-2.5 py-1 text-xs font-medium rounded-md bg-orange-600 text-white hover:bg-orange-700 transition-colors"
+                                >
+                                  Deny
+                                </button>
+                              </>
+                            )}
+                            <button
+                              onClick={() => handleEdit(reservation)}
+                              className="px-2.5 py-1 text-xs font-medium rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+                            >
+                              Edit
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Pending indicator for non-admin users */}
+          {!isAdmin() && pendingReservations.length > 0 && (
+            <div className="card border-l-4 border-l-amber-500 overflow-hidden">
+              <div className="px-6 py-4 border-b border-gray-200 bg-amber-50">
+                <h2 className="text-lg font-semibold text-gray-900">Pending Approval ({pendingReservations.length})</h2>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reservation</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cluster</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Priority</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User / Team</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Requested Time</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {pendingReservations.map((reservation) => {
+                      const isModReq = !!reservation.pending_modification
+                      const requestedBy = isModReq ? (reservation.modification_requested_by || reservation.user_name) : reservation.user_name
+                      return (
+                      <tr key={reservation.id} className={clsx('hover:bg-gray-50 cursor-pointer', requestedBy === getUsername() && 'bg-amber-50/30')} onClick={() => setViewReservation(reservation)}>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-2">
+                            <div className="text-sm font-medium text-gray-900">{reservation.title}</div>
+                            {isModReq && <ModificationBadge />}
+                          </div>
+                          {reservation.purpose && <div className="text-xs text-gray-500 truncate max-w-[200px]">{reservation.purpose}</div>}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-700">{reservation.cluster_name || 'Unknown'}</td>
+                        <td className="px-4 py-3"><ReservationTypeBadge reservation={reservation} /></td>
+                        <td className="px-4 py-3"><PriorityBadge priority={reservation.priority} /></td>
+                        <td className="px-4 py-3">
+                          <div className="text-sm text-gray-900">{requestedBy}{requestedBy === getUsername() && <span className="text-xs text-amber-600 ml-1">(you)</span>}</div>
+                          {reservation.team && <div className="text-xs text-gray-500">{reservation.team}</div>}
+                        </td>
+                        <td className="px-4 py-3 text-xs text-gray-500">
+                          <div>{format(new Date(reservation.start_time), 'MMM d, yyyy h:mm a')}</div>
+                          <div className="text-gray-400">to {format(new Date(reservation.end_time), 'MMM d, yyyy h:mm a')}</div>
+                        </td>
+                      </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           {/* Active Reservations */}
           <div className="card border-l-4 border-l-green-500 overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-200 bg-green-50">
@@ -448,12 +821,15 @@ export default function Reservations() {
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
                     {activeReservations.map((reservation) => (
-                      <tr key={reservation.id} className="hover:bg-gray-50">
+                      <tr key={reservation.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => setViewReservation(reservation)}>
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-3">
                             <div className="h-10 w-1 rounded-full" style={{ backgroundColor: reservation.color }} />
                             <div>
-                              <p className="font-medium text-gray-900">{reservation.title}</p>
+                              <div className="flex items-center gap-2">
+                                <p className="font-medium text-gray-900">{reservation.title}</p>
+                                {reservation.pending_modification && <ModificationBadge />}
+                              </div>
                               {reservation.description && (
                                 <p className="text-sm text-gray-500 truncate max-w-xs">{reservation.description}</p>
                               )}
@@ -482,8 +858,16 @@ export default function Reservations() {
                             Ends: {format(new Date(reservation.end_time), 'MMM d, yyyy h:mm a')}
                           </p>
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
-                          <button onClick={() => handleDelete(reservation.id)} className="text-red-600 hover:text-red-700">Delete</button>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm" onClick={(e) => e.stopPropagation()}>
+                          {isAdmin() && (
+                            <button onClick={() => handleEdit(reservation)} className="text-primary-600 hover:text-primary-700 mr-3">Edit</button>
+                          )}
+                          {!isAdmin() && !reservation.pending_modification && (
+                            <button onClick={() => handleRequestModify(reservation)} className="text-amber-600 hover:text-amber-700 mr-3">Request Modify</button>
+                          )}
+                          {(isAdmin() || reservation.user_name === getUsername()) && (
+                            <button onClick={() => handleCancel(reservation.id)} className="text-orange-600 hover:text-orange-700">Cancel</button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -516,12 +900,15 @@ export default function Reservations() {
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
                     {upcomingReservations.map((reservation) => (
-                      <tr key={reservation.id} className="hover:bg-gray-50">
+                      <tr key={reservation.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => setViewReservation(reservation)}>
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-3">
                             <div className="h-10 w-1 rounded-full" style={{ backgroundColor: reservation.color }} />
                             <div>
-                              <p className="font-medium text-gray-900">{reservation.title}</p>
+                              <div className="flex items-center gap-2">
+                                <p className="font-medium text-gray-900">{reservation.title}</p>
+                                {reservation.pending_modification && <ModificationBadge />}
+                              </div>
                               {reservation.description && (
                                 <p className="text-sm text-gray-500 truncate max-w-xs">{reservation.description}</p>
                               )}
@@ -544,9 +931,16 @@ export default function Reservations() {
                             to {format(new Date(reservation.end_time), 'MMM d, yyyy h:mm a')}
                           </p>
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
-                          <button onClick={() => handleCancel(reservation.id)} className="text-orange-600 hover:text-orange-700 mr-3">Cancel</button>
-                          <button onClick={() => handleDelete(reservation.id)} className="text-red-600 hover:text-red-700">Delete</button>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm" onClick={(e) => e.stopPropagation()}>
+                          {isAdmin() && (
+                            <button onClick={() => handleEdit(reservation)} className="text-primary-600 hover:text-primary-700 mr-3">Edit</button>
+                          )}
+                          {!isAdmin() && !reservation.pending_modification && (
+                            <button onClick={() => handleRequestModify(reservation)} className="text-amber-600 hover:text-amber-700 mr-3">Request Modify</button>
+                          )}
+                          {(isAdmin() || reservation.user_name === getUsername()) && (
+                            <button onClick={() => handleCancel(reservation.id)} className="text-orange-600 hover:text-orange-700">Cancel</button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -560,7 +954,7 @@ export default function Reservations() {
           <div className="card overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-200">
               <h2 className="text-lg font-semibold text-gray-900">Past ({pastReservations.length})</h2>
-              <p className="text-sm text-gray-500 mt-1">Completed and cancelled reservations</p>
+              <p className="text-sm text-gray-500 mt-1">Completed, cancelled, and denied reservations</p>
             </div>
             {pastReservations.length === 0 ? (
               <div className="px-6 py-8 text-center text-gray-500">No past reservations</div>
@@ -579,7 +973,7 @@ export default function Reservations() {
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
                     {pastReservations.map((reservation) => (
-                      <tr key={reservation.id} className="hover:bg-gray-50">
+                      <tr key={reservation.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => setViewReservation(reservation)}>
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-3">
                             <div className="h-10 w-1 rounded-full opacity-50" style={{ backgroundColor: reservation.color }} />
@@ -606,18 +1000,18 @@ export default function Reservations() {
                         </td>
                         <td className="px-6 py-4">
                           <div className="flex flex-col gap-1">
-                            <span className={`badge ${reservation.status === 'completed' ? 'badge-success' : 'badge-error'}`}>
-                              {reservation.status}
-                            </span>
-                            {reservation.status === 'cancelled' && reservation.notes && (
+                            <StatusBadge status={reservation.status} />
+                            {(reservation.status === 'cancelled' || reservation.status === 'denied') && reservation.notes && (
                               <p className="text-[10px] text-gray-400 leading-tight" title={reservation.notes}>
-                                {reservation.notes.includes('[') ? reservation.notes.match(/\[([^\]]+)\]/)?.[1] : ''}
+                                {reservation.notes.includes('[') ? reservation.notes.split('\n').pop()?.match(/\[([^\]]+)\]/)?.[1] : ''}
                               </p>
                             )}
                           </div>
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm">
-                          <button onClick={() => handleDelete(reservation.id)} className="text-red-600 hover:text-red-700">Delete</button>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm" onClick={(e) => e.stopPropagation()}>
+                          {(isAdmin() || reservation.user_name === getUsername()) && (
+                            <button onClick={() => handleDelete(reservation.id)} className="text-orange-600 hover:text-orange-700">Delete</button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -631,7 +1025,7 @@ export default function Reservations() {
       </div>
 
       <Transition appear show={isOpen} as={Fragment}>
-        <Dialog as="div" className="relative z-50" onClose={() => setIsOpen(false)}>
+        <Dialog as="div" className="relative z-50" onClose={closeModal}>
           <Transition.Child
             as={Fragment}
             enter="ease-out duration-300"
@@ -658,10 +1052,13 @@ export default function Reservations() {
                 <Dialog.Panel className="w-full max-w-lg transform overflow-hidden rounded-2xl bg-white p-6 shadow-xl transition-all">
                   <div className="flex items-center justify-between">
                     <Dialog.Title as="h3" className="text-lg font-semibold text-gray-900">
-                      New Reservation
+                      {isModifyRequest ? 'Request Modification' : editingId ? 'Edit Reservation' : 'New Reservation'}
                     </Dialog.Title>
+                    {isModifyRequest && (
+                      <p className="text-xs text-amber-600 mt-1">Changes will be submitted for admin approval</p>
+                    )}
                     <button
-                      onClick={() => setIsOpen(false)}
+                      onClick={closeModal}
                       className="p-2 rounded-lg hover:bg-gray-100"
                     >
                       <XMarkIcon className="h-5 w-5 text-gray-500" />
@@ -709,7 +1106,7 @@ export default function Reservations() {
                                       <div className="flex items-center gap-2">
                                         <div 
                                           className="w-3 h-3 rounded-full flex-shrink-0" 
-                                          style={{ backgroundColor: cluster.color || '#3B82F6' }}
+                                          style={{ backgroundColor: cluster.color || '#0891b2' }}
                                         />
                                         <span
                                           className={`block truncate ${
@@ -904,12 +1301,25 @@ export default function Reservations() {
                       />
                     </div>
 
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Priority</label>
+                      <select
+                        value={form.priority}
+                        onChange={(e) => setForm((prev) => ({ ...prev, priority: e.target.value as ReservationPriority }))}
+                        className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-primary-500 focus:ring-primary-500"
+                      >
+                        {PRIORITY_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                      </select>
+                    </div>
+
                     {selectedCluster && selectedClusterData && (
                       <div className="p-3 bg-gray-50 rounded-lg space-y-2">
                         <div className="flex items-center gap-2">
                           <div
                             className="w-4 h-4 rounded-full"
-                            style={{ backgroundColor: selectedClusterData.color || '#3B82F6' }}
+                            style={{ backgroundColor: selectedClusterData.color || '#0891b2' }}
                           />
                           <span className="text-sm text-gray-600">
                             Reservation will use <strong>{selectedCluster.name}</strong>'s color
@@ -933,20 +1343,279 @@ export default function Reservations() {
                   </div>
 
                   <div className="mt-6 flex justify-end gap-3">
-                    <button onClick={() => setIsOpen(false)} className="btn-secondary">
+                    <button onClick={closeModal} className="btn-secondary">
                       Cancel
                     </button>
-                    <button
-                      onClick={handleSubmit}
-                      disabled={createReservation.isPending}
-                      className="btn-primary"
-                    >
-                      {createReservation.isPending ? 'Creating...' : 'Create Reservation'}
-                    </button>
+                    {isModifyRequest ? (
+                      <button
+                        onClick={handleSubmitModificationRequest}
+                        disabled={requestModification.isPending}
+                        className="inline-flex items-center px-4 py-2 text-sm font-medium rounded-lg bg-amber-600 text-white hover:bg-amber-700 transition-colors"
+                      >
+                        {requestModification.isPending ? 'Submitting...' : 'Submit Modification Request'}
+                      </button>
+                    ) : editingId ? (
+                      <button
+                        onClick={handleUpdate}
+                        disabled={updateReservation.isPending}
+                        className="btn-primary"
+                      >
+                        {updateReservation.isPending ? 'Saving...' : 'Save Changes'}
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handleSubmit}
+                        disabled={createReservation.isPending}
+                        className="btn-primary"
+                      >
+                        {createReservation.isPending ? 'Creating...' : 'Create Reservation'}
+                      </button>
+                    )}
                   </div>
                 </Dialog.Panel>
               </Transition.Child>
             </div>
+          </div>
+        </Dialog>
+      </Transition>
+
+      {/* Deny Confirmation Dialog */}
+      <Transition appear show={denyDialogId !== null} as={Fragment}>
+        <Dialog as="div" className="relative z-50" onClose={() => setDenyDialogId(null)}>
+          <Transition.Child as={Fragment} enter="ease-out duration-200" enterFrom="opacity-0" enterTo="opacity-100" leave="ease-in duration-150" leaveFrom="opacity-100" leaveTo="opacity-0">
+            <div className="fixed inset-0 bg-black/25" />
+          </Transition.Child>
+          <div className="fixed inset-0 flex items-center justify-center p-4">
+            <Transition.Child as={Fragment} enter="ease-out duration-200" enterFrom="opacity-0 scale-95" enterTo="opacity-100 scale-100" leave="ease-in duration-150" leaveFrom="opacity-100 scale-100" leaveTo="opacity-0 scale-95">
+              <Dialog.Panel className="w-full max-w-md bg-white rounded-xl shadow-xl p-6">
+                <Dialog.Title className="text-lg font-semibold text-gray-900">Deny Reservation</Dialog.Title>
+                <p className="mt-2 text-sm text-gray-500">Are you sure you want to deny this reservation request?</p>
+                <div className="mt-4">
+                  <label className="block text-sm font-medium text-gray-700">Reason (optional)</label>
+                  <textarea
+                    value={denyReason}
+                    onChange={(e) => setDenyReason(e.target.value)}
+                    rows={3}
+                    className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm focus:border-orange-500 focus:ring-orange-500"
+                    placeholder="Provide a reason for denial..."
+                  />
+                </div>
+                <div className="mt-5 flex justify-end gap-3">
+                  <button onClick={() => setDenyDialogId(null)} className="btn-secondary">Cancel</button>
+                  <button
+                    onClick={handleDenyConfirm}
+                    disabled={denyReservation.isPending}
+                    className="px-4 py-2 text-sm font-medium rounded-lg bg-orange-600 text-white hover:bg-orange-700 transition-colors"
+                  >
+                    {denyReservation.isPending ? 'Denying...' : 'Deny Reservation'}
+                  </button>
+                </div>
+              </Dialog.Panel>
+            </Transition.Child>
+          </div>
+        </Dialog>
+      </Transition>
+
+      {/* Reservation Detail Popup */}
+      <Transition appear show={viewReservation !== null} as={Fragment}>
+        <Dialog as="div" className="relative z-50" onClose={() => setViewReservation(null)}>
+          <Transition.Child as={Fragment} enter="ease-out duration-200" enterFrom="opacity-0" enterTo="opacity-100" leave="ease-in duration-150" leaveFrom="opacity-100" leaveTo="opacity-0">
+            <div className="fixed inset-0 bg-black/30" />
+          </Transition.Child>
+          <div className="fixed inset-0 flex items-center justify-center p-4">
+            <Transition.Child as={Fragment} enter="ease-out duration-200" enterFrom="opacity-0 scale-95" enterTo="opacity-100 scale-100" leave="ease-in duration-150" leaveFrom="opacity-100 scale-100" leaveTo="opacity-0 scale-95">
+              <Dialog.Panel className="w-full max-w-lg bg-white rounded-xl shadow-xl overflow-hidden">
+                {viewReservation && (() => {
+                  const r = viewReservation
+                  const isPending = r.status === 'pending'
+                  const isActiveOrUpcoming = r.status === 'active' || r.status === 'scheduled'
+                  return (
+                    <>
+                      <div className="flex items-center gap-3 px-6 pt-5 pb-3">
+                        <div className="w-1.5 h-10 rounded-full" style={{ backgroundColor: r.color }} />
+                        <div className="flex-1 min-w-0">
+                          <Dialog.Title className="text-lg font-semibold text-gray-900 truncate">{r.title}</Dialog.Title>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <StatusBadge status={r.status} />
+                            <PriorityBadge priority={r.priority} />
+                          </div>
+                        </div>
+                        <button onClick={() => setViewReservation(null)} className="p-1 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100">
+                          <XMarkIcon className="h-5 w-5" />
+                        </button>
+                      </div>
+                      <div className="px-6 pb-5 space-y-4">
+                        {r.description && (
+                          <p className="text-sm text-gray-600">{r.description}</p>
+                        )}
+                        <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                          <div>
+                            <dt className="text-xs font-medium text-gray-500 uppercase">Cluster</dt>
+                            <dd className="mt-0.5 text-gray-900">{r.cluster_name || 'Unknown'}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-xs font-medium text-gray-500 uppercase">Type</dt>
+                            <dd className="mt-0.5"><ReservationTypeBadge reservation={r} /></dd>
+                          </div>
+                          {r.reservation_type === 'gpu' && r.gpu_count != null && (
+                            <div>
+                              <dt className="text-xs font-medium text-gray-500 uppercase">GPUs</dt>
+                              <dd className="mt-0.5 text-gray-900">{r.gpu_count}</dd>
+                            </div>
+                          )}
+                          <div>
+                            <dt className="text-xs font-medium text-gray-500 uppercase">User</dt>
+                            <dd className="mt-0.5 text-gray-900">{r.user_name}{r.team && <span className="text-gray-500"> &middot; {r.team}</span>}</dd>
+                          </div>
+                          {r.user_email && (
+                            <div>
+                              <dt className="text-xs font-medium text-gray-500 uppercase">Email</dt>
+                              <dd className="mt-0.5 text-gray-900">{r.user_email}</dd>
+                            </div>
+                          )}
+                          <div>
+                            <dt className="text-xs font-medium text-gray-500 uppercase">Start</dt>
+                            <dd className="mt-0.5 text-gray-900">{format(new Date(r.start_time), 'MMM d, yyyy h:mm a')}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-xs font-medium text-gray-500 uppercase">End</dt>
+                            <dd className="mt-0.5 text-gray-900">{format(new Date(r.end_time), 'MMM d, yyyy h:mm a')}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-xs font-medium text-gray-500 uppercase">Isolation</dt>
+                            <dd className="mt-0.5 text-gray-900">{r.enforce_isolation ? 'Enabled' : 'Disabled'}</dd>
+                          </div>
+                          {r.enforcement_namespace && (
+                            <div>
+                              <dt className="text-xs font-medium text-gray-500 uppercase">Namespace</dt>
+                              <dd className="mt-0.5 font-mono text-xs text-gray-900">{r.enforcement_namespace}</dd>
+                            </div>
+                          )}
+                          <div>
+                            <dt className="text-xs font-medium text-gray-500 uppercase">Created</dt>
+                            <dd className="mt-0.5 text-gray-900">{format(new Date(r.created_at), 'MMM d, yyyy h:mm a')}</dd>
+                          </div>
+                        </div>
+                        {r.purpose && (
+                          <div>
+                            <dt className="text-xs font-medium text-gray-500 uppercase mb-1">Purpose</dt>
+                            <dd className="text-sm text-gray-700 bg-gray-50 rounded-lg p-3">{r.purpose}</dd>
+                          </div>
+                        )}
+                        {r.notes && (
+                          <div>
+                            <dt className="text-xs font-medium text-gray-500 uppercase mb-1">Notes</dt>
+                            <dd className="text-sm text-gray-700 bg-gray-50 rounded-lg p-3 whitespace-pre-line">{r.notes}</dd>
+                          </div>
+                        )}
+
+                        {/* Pending Modification Section */}
+                        {r.pending_modification && (
+                          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2">
+                            <div className="flex items-center gap-2">
+                              <ModificationBadge />
+                              <span className="text-xs text-gray-500">
+                                by {r.modification_requested_by}{r.modification_requested_at && ` on ${format(new Date(r.modification_requested_at), 'MMM d, h:mm a')}`}
+                              </span>
+                            </div>
+                            <div className="text-sm space-y-1">
+                              {Object.entries(r.pending_modification).map(([key, val]) => (
+                                <div key={key} className="flex items-center gap-2 text-xs">
+                                  <span className="font-medium text-gray-700 capitalize">{key.replace(/_/g, ' ')}:</span>
+                                  <span className="text-gray-900">{String(val)}</span>
+                                </div>
+                              ))}
+                            </div>
+                            {isAdmin() && (
+                              <div className="flex items-center gap-2 pt-1">
+                                <button
+                                  onClick={() => { approveModification.mutateAsync(r.id); setViewReservation(null) }}
+                                  disabled={approveModification.isPending}
+                                  className="px-3 py-1.5 text-xs font-medium rounded-md bg-green-600 text-white hover:bg-green-700 transition-colors"
+                                >
+                                  Approve Changes
+                                </button>
+                                <button
+                                  onClick={() => { denyModification.mutateAsync({ id: r.id }); setViewReservation(null) }}
+                                  disabled={denyModification.isPending}
+                                  className="px-3 py-1.5 text-xs font-medium rounded-md bg-orange-600 text-white hover:bg-orange-700 transition-colors"
+                                >
+                                  Deny Changes
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {isAdmin() && (isPending || isActiveOrUpcoming) && (
+                          <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+                            {isPending && (
+                              <>
+                                <button
+                                  onClick={() => { handleApprove(r.id); setViewReservation(null) }}
+                                  disabled={approveReservation.isPending}
+                                  className="px-4 py-2 text-sm font-medium rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors"
+                                >
+                                  Approve
+                                </button>
+                                <button
+                                  onClick={() => { setDenyDialogId(r.id); setDenyReason(''); setViewReservation(null) }}
+                                  className="px-4 py-2 text-sm font-medium rounded-lg bg-orange-600 text-white hover:bg-orange-700 transition-colors"
+                                >
+                                  Deny
+                                </button>
+                                <button
+                                  onClick={() => { handleEdit(r); setViewReservation(null) }}
+                                  className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+                                >
+                                  Modify
+                                </button>
+                              </>
+                            )}
+                            {isActiveOrUpcoming && (
+                              <>
+                                <button
+                                  onClick={() => { handleEdit(r); setViewReservation(null) }}
+                                  className="px-4 py-2 text-sm font-medium rounded-lg border border-primary-600 text-primary-600 hover:bg-primary-50 transition-colors"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  onClick={() => { handleCancel(r.id); setViewReservation(null) }}
+                                  className="px-4 py-2 text-sm font-medium rounded-lg bg-orange-600 text-white hover:bg-orange-700 transition-colors"
+                                >
+                                  Cancel
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Non-admin user actions */}
+                        {!isAdmin() && isActiveOrUpcoming && (
+                          <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
+                            {!r.pending_modification && (
+                              <button
+                                onClick={() => { handleRequestModify(r); setViewReservation(null) }}
+                                className="px-4 py-2 text-sm font-medium rounded-lg border border-amber-500 text-amber-700 hover:bg-amber-50 transition-colors"
+                              >
+                                Request Modification
+                              </button>
+                            )}
+                            <button
+                              onClick={() => { handleCancel(r.id); setViewReservation(null) }}
+                              className="px-4 py-2 text-sm font-medium rounded-lg bg-orange-600 text-white hover:bg-orange-700 transition-colors"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )
+                })()}
+              </Dialog.Panel>
+            </Transition.Child>
           </div>
         </Dialog>
       </Transition>

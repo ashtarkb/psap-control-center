@@ -1,31 +1,87 @@
 import secrets
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+from fastapi import HTTPException, Request, status
+from jose import JWTError, jwt
 
 from app.core.config import settings
 from app.utils.logger import create_logger
 
 logger = create_logger("Auth")
 
-security = HTTPBasic()
+COOKIE_NAME = "session"
 
 
-def require_auth(
-    credentials: HTTPBasicCredentials = Depends(security),
-) -> str:
-    correct_user = secrets.compare_digest(
-        credentials.username, settings.ADMIN_USERNAME
+def validate_credentials(username: str, password: str) -> Optional[dict]:
+    """Check username/password against env-var accounts.
+    Returns {"username": ..., "role": ...} on success, None on failure.
+    """
+    if secrets.compare_digest(username, settings.ADMIN_USERNAME) and \
+       secrets.compare_digest(password, settings.ADMIN_PASSWORD):
+        return {"username": username, "role": "admin"}
+
+    if secrets.compare_digest(username, settings.USER_USERNAME) and \
+       secrets.compare_digest(password, settings.USER_PASSWORD):
+        return {"username": username, "role": "user"}
+
+    return None
+
+
+def create_session_token(username: str, role: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
     )
-    correct_pass = secrets.compare_digest(
-        credentials.password, settings.ADMIN_PASSWORD
+    payload = {"sub": username, "role": role, "exp": expire}
+    return jwt.encode(
+        payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM
     )
-    if not (correct_user and correct_pass):
-        logger.warn(
-            "Failed login attempt for user:", credentials.username
+
+
+def decode_session_token(token: str) -> Optional[dict]:
+    try:
+        payload = jwt.decode(
+            token, settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
         )
+        username: Optional[str] = payload.get("sub")
+        role: Optional[str] = payload.get("role")
+        if username is None or role is None:
+            return None
+        return {"username": username, "role": role}
+    except JWTError:
+        return None
+
+
+def get_current_user(request: Request) -> Optional[dict]:
+    """Extract user from the session cookie. Returns None if absent/invalid."""
+    token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        return None
+    return decode_session_token(token)
+
+
+def require_auth(request: Request) -> dict:
+    """Dependency: any authenticated user (admin or user)."""
+    user = get_current_user(request)
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Basic"},
+            detail="Not authenticated",
         )
-    return credentials.username
+    return user
+
+
+def require_admin(request: Request) -> dict:
+    """Dependency: admin role only."""
+    user = require_auth(request)
+    if user["role"] != "admin":
+        logger.warn(
+            "Forbidden: user '%s' (role=%s) attempted admin action",
+            user["username"], user["role"],
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    return user

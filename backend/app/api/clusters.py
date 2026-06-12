@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
 from app.core.database import get_db
-from app.core.auth import require_auth
+from app.core.auth import require_admin
 from app.services.cluster_service import ClusterService
 from app.services.kubernetes_service import KubernetesService
 from app.schemas.cluster import (
@@ -44,7 +44,7 @@ async def get_refresh_schedule():
 @router.post("/validate-kubeconfig")
 async def validate_kubeconfig(
     file: UploadFile = File(...),
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_admin),
 ):
     content = await file.read()
     try:
@@ -71,7 +71,7 @@ class CredentialsLogin(BaseModel):
 @router.post("/test-credentials")
 async def test_credentials(
     credentials: CredentialsLogin,
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_admin),
 ):
     """
     Test if credentials can connect to an OpenShift cluster.
@@ -121,7 +121,7 @@ async def list_clusters(
 @router.post("", response_model=ClusterResponse, status_code=201)
 async def create_cluster(
     cluster_data: ClusterCreate,
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     service = ClusterService(db)
@@ -155,7 +155,7 @@ async def get_cluster(
 async def update_cluster(
     cluster_id: str,
     cluster_data: ClusterUpdate,
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     service = ClusterService(db)
@@ -170,7 +170,7 @@ async def update_cluster(
 @router.delete("/{cluster_id}", status_code=204)
 async def delete_cluster(
     cluster_id: str,
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     service = ClusterService(db)
@@ -212,7 +212,7 @@ async def refresh_cluster_status(
 async def upload_kubeconfig(
     cluster_id: str,
     file: UploadFile = File(...),
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     service = ClusterService(db)
@@ -236,7 +236,7 @@ async def upload_kubeconfig(
 async def login_with_credentials(
     cluster_id: str,
     credentials: CredentialsLogin,
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -282,7 +282,7 @@ async def login_with_credentials(
 async def reauthenticate_cluster(
     cluster_id: str,
     credentials: CredentialsLogin,
-    _user: str = Depends(require_auth),
+    _user: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """

@@ -4,7 +4,7 @@
 
 @layer base {
   body {
-    @apply bg-gray-50 text-gray-900 antialiased;
+    @apply bg-[#f0f0f0] text-gray-900 antialiased;
   }
 }
 
@@ -22,7 +22,7 @@
   }
 
   .btn-danger {
-    @apply btn bg-red-600 text-white hover:bg-red-700 focus:ring-red-500;
+    @apply btn bg-orange-600 text-white hover:bg-orange-700 focus:ring-orange-500;
   }
 
   .input {
@@ -46,11 +46,11 @@
   }
 
   .badge-error {
-    @apply badge bg-red-100 text-red-800;
+    @apply badge bg-orange-100 text-orange-800;
   }
 
   .badge-info {
-    @apply badge bg-blue-100 text-blue-800;
+    @apply badge bg-purple-100 text-purple-800;
   }
 }
 
@@ -63,7 +63,7 @@
 }
 
 .rbc-today {
-  @apply bg-primary-50;
+  @apply bg-blue-50;
 }
 
 .rbc-event {
@@ -75,5 +75,5 @@
 }
 
 .rbc-toolbar button.rbc-active {
-  @apply bg-primary-600 text-white border-primary-600;
+  @apply bg-[#06c] text-white border-[#06c];
 }

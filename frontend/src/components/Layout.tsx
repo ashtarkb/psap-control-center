@@ -9,6 +9,7 @@ import {
   ClipboardDocumentListIcon,
   BeakerIcon,
   ChartBarIcon,
+  Cog6ToothIcon,
   LockClosedIcon,
   LockOpenIcon,
   FireIcon,
@@ -16,8 +17,10 @@ import {
 import clsx from 'clsx'
 import LoginModal from './LoginModal'
 import HearthConnectModal from './HearthConnectModal'
-import { isAuthenticated, getCredentials, clearCredentials } from '../stores/authStore'
+import { isAuthenticated, isAdmin, getSession, clearSession } from '../stores/authStore'
+import { authApi } from '../services/api'
 import { useHearthStatus, useDisconnectHearth } from '../hooks/useHearth'
+import { useReservations } from '../hooks/useReservations'
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
@@ -26,6 +29,7 @@ const navigation = [
   { name: 'Calendar', href: '/calendar', icon: CalendarDaysIcon },
   { name: 'Testing', href: '/testing', icon: BeakerIcon, comingSoon: true },
   { name: 'Results', href: '/results', icon: ChartBarIcon, comingSoon: true },
+  { name: 'Settings', href: '/settings', icon: Cog6ToothIcon, adminOnly: true },
 ]
 
 function HearthIndicator({
@@ -43,15 +47,15 @@ function HearthIndicator({
     return (
       <button
         onClick={onConnectClick}
-        className="w-full rounded-xl border border-dashed border-gray-300 p-3 hover:border-orange-400 hover:bg-orange-50 transition-colors group"
+        className="w-full rounded-lg border border-dashed border-gray-600 p-3 hover:border-orange-400 hover:bg-white/5 transition-colors group"
       >
         <div className="flex items-center gap-2.5">
-          <div className="h-8 w-8 rounded-lg bg-gray-100 group-hover:bg-orange-100 flex items-center justify-center transition-colors">
-            <FireIcon className="h-4 w-4 text-gray-400 group-hover:text-orange-500 transition-colors" />
+          <div className="h-8 w-8 rounded-lg bg-white/10 group-hover:bg-orange-500/20 flex items-center justify-center transition-colors">
+            <FireIcon className="h-4 w-4 text-gray-400 group-hover:text-orange-400 transition-colors" />
           </div>
           <div className="text-left">
-            <p className="text-xs font-semibold text-gray-600 group-hover:text-orange-700">Connect Hearth</p>
-            <p className="text-[10px] text-gray-400">GPU cluster operator</p>
+            <p className="text-xs font-semibold text-gray-300 group-hover:text-orange-300">Connect Hearth</p>
+            <p className="text-[10px] text-gray-500">GPU cluster operator</p>
           </div>
         </div>
       </button>
@@ -60,36 +64,36 @@ function HearthIndicator({
 
   return (
     <div className={clsx(
-      'rounded-xl p-3 border',
+      'rounded-lg p-3 border',
       available
-        ? 'bg-gradient-to-br from-orange-50 to-amber-50 border-orange-200'
-        : 'bg-gradient-to-br from-red-50 to-orange-50 border-red-200'
+        ? 'bg-white/5 border-green-500/30'
+        : 'bg-white/5 border-orange-500/30'
     )}>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2.5">
           <div className={clsx(
             'h-8 w-8 rounded-lg flex items-center justify-center',
-            available ? 'bg-orange-100' : 'bg-red-100'
+            available ? 'bg-green-500/20' : 'bg-orange-500/20'
           )}>
             <FireIcon className={clsx(
               'h-4 w-4',
-              available ? 'text-orange-600' : 'text-red-500'
+              available ? 'text-green-400' : 'text-orange-400'
             )} />
           </div>
           <div>
             <div className="flex items-center gap-1.5">
-              <p className="text-xs font-semibold text-gray-700">Hearth</p>
+              <p className="text-xs font-semibold text-gray-200">Hearth</p>
               <span className="relative flex h-2 w-2">
                 {available && (
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
                 )}
                 <span className={clsx(
                   'relative inline-flex rounded-full h-2 w-2',
-                  available ? 'bg-green-500' : 'bg-red-400'
+                  available ? 'bg-green-400' : 'bg-orange-400'
                 )} />
               </span>
             </div>
-            <p className="text-[10px] text-gray-500">
+            <p className="text-[10px] text-gray-400">
               {available
                 ? `${hearthStatus?.cluster_count || 0} clusters · ${hearthStatus?.total_gpus || 0} GPUs`
                 : 'Connection error'}
@@ -99,7 +103,7 @@ function HearthIndicator({
         <button
           onClick={() => disconnectHearth.mutate()}
           disabled={disconnectHearth.isPending}
-          className="text-[10px] text-gray-400 hover:text-red-600 transition-colors px-1.5 py-0.5 rounded hover:bg-white/60"
+          className="text-[10px] text-gray-500 hover:text-orange-400 transition-colors px-1.5 py-0.5 rounded hover:bg-white/10"
           title="Disconnect Hearth"
         >
           {disconnectHearth.isPending ? '...' : 'Disconnect'}
@@ -117,6 +121,13 @@ export default function Layout() {
   const location = useLocation()
 
   const { data: hearthStatus } = useHearthStatus()
+  const admin = isAdmin()
+  const { data: reservationsData } = useReservations(
+    { status: 'pending' },
+    { enabled: admin },
+  )
+  const pendingCount = admin ? (reservationsData?.reservations?.length ?? 0) : 0
+  const filteredNav = navigation.filter(item => !item.adminOnly || admin)
 
   const syncAuth = useCallback(() => setAuthed(isAuthenticated()), [])
 
@@ -125,12 +136,17 @@ export default function Layout() {
     return () => window.removeEventListener('auth-change', syncAuth)
   }, [syncAuth])
 
-  const handleLogout = () => {
-    clearCredentials()
+  const handleLogout = async () => {
+    try {
+      await authApi.logout()
+    } catch {
+      // clear locally even if the server call fails
+    }
+    clearSession()
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-[#f0f0f0]">
       <Transition.Root show={sidebarOpen} as={Fragment}>
         <Dialog as="div" className="relative z-50 lg:hidden" onClose={setSidebarOpen}>
           <Transition.Child
@@ -156,35 +172,40 @@ export default function Layout() {
               leaveTo="-translate-x-full"
             >
               <Dialog.Panel className="relative mr-16 flex w-full max-w-xs flex-1">
-                <div className="flex grow flex-col gap-y-5 overflow-y-auto bg-white px-6 pb-4">
-                  <div className="flex h-16 shrink-0 items-center">
+                <div className="flex grow flex-col gap-y-5 overflow-y-auto bg-[#212427] px-0 pb-4">
+                  <div className="flex h-16 shrink-0 items-center px-6">
                     <div className="flex items-center gap-2">
-                      <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-primary-600 to-primary-700 flex items-center justify-center">
+                      <div className="h-8 w-8 rounded-lg bg-primary-600 flex items-center justify-center">
                         <span className="text-white font-bold text-sm">P</span>
                       </div>
-                      <span className="text-xl font-bold text-gray-900">PSAP Control Center</span>
+                      <span className="text-xl font-bold text-white font-display">PSAP Control Center</span>
                     </div>
                   </div>
                   <nav className="flex flex-1 flex-col">
-                    <ul className="flex flex-1 flex-col gap-y-1">
-                      {navigation.map((item) => (
+                    <ul className="flex flex-1 flex-col gap-y-0.5">
+                      {filteredNav.map((item) => (
                         <li key={item.name}>
                           <NavLink
                             to={item.href}
                             onClick={() => setSidebarOpen(false)}
                             className={({ isActive }) =>
                               clsx(
-                                'group flex gap-x-3 rounded-lg p-3 text-sm font-medium transition-colors',
+                                'group flex gap-x-3 px-6 py-3 text-sm font-medium transition-colors border-l-[3px]',
                                 isActive
-                                  ? 'bg-primary-50 text-primary-700'
-                                  : 'text-gray-700 hover:bg-gray-50 hover:text-primary-600'
+                                  ? 'bg-white/10 text-white border-l-[#73BCF7]'
+                                  : 'text-gray-300 hover:bg-white/5 hover:text-white border-l-transparent'
                               )
                             }
                           >
                             <item.icon className="h-5 w-5 shrink-0" />
                             {item.name}
+                            {item.name === 'Reservations' && pendingCount > 0 && (
+                              <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
+                                {pendingCount} pending
+                              </span>
+                            )}
                             {item.comingSoon && (
-                              <span className="ml-auto text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
+                              <span className="ml-auto text-xs text-gray-500 bg-white/10 px-2 py-0.5 rounded-full">
                                 Soon
                               </span>
                             )}
@@ -201,42 +222,47 @@ export default function Layout() {
       </Transition.Root>
 
       <div className="hidden lg:fixed lg:inset-y-0 lg:z-50 lg:flex lg:w-72 lg:flex-col">
-        <div className="flex grow flex-col gap-y-5 overflow-y-auto border-r border-gray-200 bg-white px-6 pb-4">
-          <div className="flex h-16 shrink-0 items-center">
+        <div className="flex grow flex-col gap-y-5 overflow-y-auto bg-[#212427] px-0 pb-4">
+          <div className="flex h-16 shrink-0 items-center px-6">
             <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-primary-600 to-primary-700 flex items-center justify-center shadow-lg shadow-primary-500/20">
+              <div className="h-10 w-10 rounded-xl bg-primary-600 flex items-center justify-center">
                 <span className="text-white font-bold text-lg">P</span>
               </div>
               <div>
-                <h1 className="text-lg font-bold text-gray-900">PSAP Control Center</h1>
-                <p className="text-xs text-gray-500">Cluster Management</p>
+                <h1 className="text-lg font-bold text-white font-display">PSAP Control Center</h1>
+                <p className="text-xs text-gray-400">Cluster Management</p>
               </div>
             </div>
           </div>
           <nav className="flex flex-1 flex-col">
-            <ul className="flex flex-1 flex-col gap-y-1">
-              {navigation.map((item) => (
+            <ul className="flex flex-1 flex-col gap-y-0.5">
+              {filteredNav.map((item) => (
                 <li key={item.name}>
                   <NavLink
                     to={item.href}
                     className={({ isActive }) =>
                       clsx(
-                        'group flex gap-x-3 rounded-lg p-3 text-sm font-medium transition-all duration-200',
+                        'group flex gap-x-3 px-6 py-3 text-sm font-medium transition-all duration-200 border-l-[3px]',
                         isActive
-                          ? 'bg-primary-50 text-primary-700 shadow-sm'
-                          : 'text-gray-700 hover:bg-gray-50 hover:text-primary-600'
+                          ? 'bg-white/10 text-white border-l-[#73BCF7]'
+                          : 'text-gray-300 hover:bg-white/5 hover:text-white border-l-transparent'
                       )
                     }
                   >
                     <item.icon
                       className={clsx(
                         'h-5 w-5 shrink-0 transition-colors',
-                        location.pathname.startsWith(item.href) ? 'text-primary-600' : 'text-gray-400 group-hover:text-primary-500'
+                        location.pathname.startsWith(item.href) ? 'text-[#73BCF7]' : 'text-gray-500 group-hover:text-gray-300'
                       )}
                     />
                     {item.name}
+                    {item.name === 'Reservations' && pendingCount > 0 && (
+                      <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
+                        {pendingCount} pending
+                      </span>
+                    )}
                     {item.comingSoon && (
-                      <span className="ml-auto text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
+                      <span className="ml-auto text-xs text-gray-500 bg-white/10 px-2 py-0.5 rounded-full">
                         Soon
                       </span>
                     )}
@@ -245,12 +271,12 @@ export default function Layout() {
               ))}
             </ul>
 
-            <div className="mt-auto pt-4 border-t border-gray-200 space-y-3">
+            <div className="mt-auto pt-4 border-t border-white/10 space-y-3 px-6">
               <HearthIndicator onConnectClick={() => setHearthConnectOpen(true)} />
-              <div className="rounded-xl bg-gradient-to-br from-gray-50 to-gray-100 p-4">
+              <div className="rounded-lg bg-white/5 p-4">
                 <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Organization</p>
-                <p className="mt-1 text-sm font-semibold text-gray-900">OpenShift PSAP</p>
-                <p className="text-xs text-gray-500">Performance & Scale for AI Platforms</p>
+                <p className="mt-1 text-sm font-semibold text-white">OpenShift PSAP</p>
+                <p className="text-xs text-gray-400">Performance & Scale for AI Platforms</p>
               </div>
             </div>
           </nav>
@@ -258,10 +284,10 @@ export default function Layout() {
       </div>
 
       <div className="lg:pl-72">
-        <div className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-x-4 border-b border-gray-200 bg-white/80 backdrop-blur-sm px-4 shadow-sm sm:gap-x-6 sm:px-6 lg:px-8">
+        <div className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-x-4 border-b border-white/10 bg-[#151515] px-4 sm:gap-x-6 sm:px-6 lg:px-8">
           <button
             type="button"
-            className="-m-2.5 p-2.5 text-gray-700 lg:hidden"
+            className="-m-2.5 p-2.5 text-gray-300 lg:hidden"
             onClick={() => setSidebarOpen(true)}
           >
             <span className="sr-only">Open sidebar</span>
@@ -271,16 +297,15 @@ export default function Layout() {
           <div className="flex flex-1 gap-x-4 self-stretch lg:gap-x-6">
             <div className="flex flex-1" />
             <div className="flex items-center gap-x-4 lg:gap-x-6">
-              {/* Hearth connection badge in header */}
               <button
                 onClick={() => !hearthStatus?.configured && setHearthConnectOpen(true)}
                 className={clsx(
                   'hidden sm:flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors',
                   hearthStatus?.available
-                    ? 'bg-orange-50 text-orange-700 border border-orange-200'
+                    ? 'bg-green-500/10 text-green-400 border border-green-500/30'
                     : hearthStatus?.configured
-                    ? 'bg-red-50 text-red-600 border border-red-200'
-                    : 'bg-gray-100 text-gray-500 border border-gray-200 hover:border-orange-300 hover:text-orange-600 cursor-pointer'
+                    ? 'bg-orange-500/10 text-orange-400 border border-orange-500/30'
+                    : 'bg-white/5 text-gray-400 border border-white/10 hover:border-orange-500/30 hover:text-orange-400 cursor-pointer'
                 )}
                 title={
                   hearthStatus?.available
@@ -294,20 +319,20 @@ export default function Layout() {
                 <span className="relative flex h-1.5 w-1.5">
                   <span className={clsx(
                     'relative inline-flex rounded-full h-1.5 w-1.5',
-                    hearthStatus?.available ? 'bg-green-500' : hearthStatus?.configured ? 'bg-red-400' : 'bg-gray-400'
+                    hearthStatus?.available ? 'bg-green-400' : hearthStatus?.configured ? 'bg-orange-400' : 'bg-gray-500'
                   )} />
                 </span>
               </button>
-              <div className="hidden lg:block lg:h-6 lg:w-px lg:bg-gray-200" />
+              <div className="hidden lg:block lg:h-6 lg:w-px lg:bg-white/10" />
               {authed ? (
                 <div className="flex items-center gap-3">
-                  <span className="flex items-center gap-1.5 text-sm text-gray-600">
-                    <LockClosedIcon className="h-4 w-4 text-green-500" />
-                    <span className="hidden sm:inline font-medium">{getCredentials()?.username}</span>
+                  <span className="flex items-center gap-1.5 text-sm text-gray-300">
+                    <LockClosedIcon className="h-4 w-4 text-green-400" />
+                    <span className="hidden sm:inline font-medium">{getSession()?.username}</span>
                   </span>
                   <button
                     onClick={handleLogout}
-                    className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+                    className="rounded-lg border border-white/20 px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-white/10 transition-colors"
                   >
                     Sign Out
                   </button>
@@ -325,7 +350,7 @@ export default function Layout() {
           </div>
         </div>
 
-        <main className="py-6 px-4 sm:px-6 lg:px-8">
+        <main className="py-6 px-4 sm:px-6 lg:px-8 bg-[#f0f0f0] min-h-[calc(100vh-4rem)]">
           <Outlet />
         </main>
       </div>
