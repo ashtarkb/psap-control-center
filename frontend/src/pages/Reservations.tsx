@@ -587,7 +587,18 @@ export default function Reservations() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      <div className="absolute inset-0 z-50 flex items-center justify-center bg-white/80 backdrop-blur-sm rounded-xl">
+        <div className="text-center max-w-md px-6 py-10">
+          <CalendarDaysIcon className="h-16 w-16 mx-auto text-gray-400 mb-4" />
+          <h2 className="text-xl font-semibold text-gray-900 font-display">Reservations Disabled</h2>
+          <p className="mt-3 text-gray-600">
+            Reservations through the control center are currently disabled, please coordinate on the{' '}
+            <span className="font-semibold text-gray-900">#PSAP-clusters</span> channel.
+          </p>
+        </div>
+      </div>
+
       {/* Week Calendar - Centered */}
       <div className="flex justify-center">
         <div className="w-full max-w-4xl">
