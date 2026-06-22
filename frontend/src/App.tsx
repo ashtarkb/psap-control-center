@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useEffect, useCallback } from 'react'
 import { Routes, Route, Navigate, Link } from 'react-router-dom'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
@@ -9,8 +9,7 @@ import Calendar from './pages/Calendar'
 import Testing from './pages/Testing'
 import Results from './pages/Results'
 import Settings from './pages/Settings'
-import LoginPage from './pages/LoginPage'
-import { isAuthenticated, isAdmin, setSession } from './stores/authStore'
+import { isAdmin, setSession } from './stores/authStore'
 import { authApi } from './services/api'
 
 function NotFound() {
@@ -26,9 +25,7 @@ function NotFound() {
 }
 
 function App() {
-  const [authed, setAuthed] = useState(isAuthenticated())
-  const [loading, setLoading] = useState(true)
-  const syncAuth = useCallback(() => setAuthed(isAuthenticated()), [])
+  const syncAuth = useCallback(() => {}, [])
 
   useEffect(() => {
     window.addEventListener('auth-change', syncAuth)
@@ -41,28 +38,9 @@ function App() {
         setSession(session)
       })
       .catch(() => {
-        // No valid session cookie -- stay on login
+        // No valid session cookie — anonymous viewing is fine
       })
-      .finally(() => setLoading(false))
   }, [])
-
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-[#f0f0f0]">
-        <div className="flex flex-col items-center gap-3">
-          <svg className="animate-spin h-8 w-8 text-[#73BCF7]" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-          </svg>
-          <p className="text-sm text-gray-400">Loading...</p>
-        </div>
-      </div>
-    )
-  }
-
-  if (!authed) {
-    return <LoginPage />
-  }
 
   return (
     <Routes>
