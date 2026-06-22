@@ -162,7 +162,12 @@ export default function Dashboard() {
 
       {/* GPU Reservation Summary */}
       {totalReservedGpus > 0 && (
-        <div className="card p-4 bg-gradient-to-r from-purple-50 to-blue-50">
+        <div className="card p-4 bg-gradient-to-r from-purple-50 to-blue-50 relative overflow-hidden">
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 backdrop-blur-sm">
+            <p className="text-sm text-gray-600 text-center px-4">
+              Reservations disabled — coordinate on <span className="font-semibold text-gray-900">#PSAP-clusters</span>
+            </p>
+          </div>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <CpuChipIcon className="h-6 w-6 text-purple-600" />
@@ -257,7 +262,15 @@ export default function Dashboard() {
           )}
         </div>
 
-        <div className="card">
+        <div className="card relative overflow-hidden">
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 backdrop-blur-sm">
+            <div className="text-center px-4">
+              <CalendarDaysIcon className="h-10 w-10 mx-auto text-gray-400 mb-2" />
+              <p className="text-sm text-gray-600">
+                Reservations disabled — coordinate on <span className="font-semibold text-gray-900">#PSAP-clusters</span>
+              </p>
+            </div>
+          </div>
           <div className="px-6 py-4 border-b border-gray-200 bg-green-50">
             <div className="flex items-center gap-2">
               <span className="relative flex h-3 w-3">
@@ -447,7 +460,15 @@ export default function Dashboard() {
       )}
 
       {/* Upcoming Reservations */}
-      <div className="card">
+      <div className="card relative overflow-hidden">
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 backdrop-blur-sm">
+          <div className="text-center px-4">
+            <CalendarDaysIcon className="h-10 w-10 mx-auto text-gray-400 mb-2" />
+            <p className="text-sm text-gray-600">
+              Reservations disabled — coordinate on <span className="font-semibold text-gray-900">#PSAP-clusters</span>
+            </p>
+          </div>
+        </div>
         <div className="px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">Upcoming Reservations</h2>
           <p className="text-sm text-gray-500 mt-1">Scheduled reservations for the next 7 days</p>
@@ -529,7 +550,15 @@ export default function Dashboard() {
       </div>
 
       {/* Past Reservations */}
-      <div className="card">
+      <div className="card relative overflow-hidden">
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 backdrop-blur-sm">
+          <div className="text-center px-4">
+            <CalendarDaysIcon className="h-10 w-10 mx-auto text-gray-400 mb-2" />
+            <p className="text-sm text-gray-600">
+              Reservations disabled — coordinate on <span className="font-semibold text-gray-900">#PSAP-clusters</span>
+            </p>
+          </div>
+        </div>
         <div className="px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">Past Reservations</h2>
           <p className="text-sm text-gray-500 mt-1">Completed reservations from the last 30 days</p>
