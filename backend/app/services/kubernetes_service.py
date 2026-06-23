@@ -116,6 +116,7 @@ class KubernetesService:
             if host.find(entry) != -1:
                 return
         self._configuration.proxy = proxy_url
+        self._configuration.verify_ssl = False
 
     @property
     def core_v1(self):
