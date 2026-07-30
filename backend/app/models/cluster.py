@@ -29,6 +29,8 @@ class Cluster(Base):
     api_server_url = Column(String(512), nullable=True)
     kubeconfig_path = Column(String(512), nullable=False)
     color = Column(String(7), nullable=False, default="#0891b2")  # Hex color
+    provider = Column(String(20), nullable=False, default="ibm")  # Cloud provider: "ibm", "other"
+    infra_id = Column(String(100), nullable=True)  # OpenShift infrastructureName, used as billing CSV join key
     
     status = Column(String(50), default="unknown")
     last_health_check = Column(DateTime, nullable=True)
@@ -47,6 +49,7 @@ class Cluster(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     reservations = relationship("Reservation", back_populates="cluster")
+    costs = relationship("ClusterCost", back_populates="cluster", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Cluster(name={self.name}, status={self.status})>"

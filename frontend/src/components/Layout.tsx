@@ -136,13 +136,9 @@ export default function Layout() {
     return () => window.removeEventListener('auth-change', syncAuth)
   }, [syncAuth])
 
-  const handleLogout = async () => {
-    try {
-      await authApi.logout()
-    } catch {
-      // clear locally even if the server call fails
-    }
+  const handleLogout = () => {
     clearSession()
+    authApi.logout().catch(() => {})
   }
 
   return (

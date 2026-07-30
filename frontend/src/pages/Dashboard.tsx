@@ -8,6 +8,7 @@ import {
   FireIcon,
   LockClosedIcon,
   ExclamationTriangleIcon,
+  CurrencyDollarIcon,
 } from '@heroicons/react/24/outline'
 import { useQueries } from '@tanstack/react-query'
 import { useClusters } from '../hooks/useClusters'
@@ -15,7 +16,8 @@ import { useReservations } from '../hooks/useReservations'
 import { useHearthClusters } from '../hooks/useHearth'
 import { clusterApi } from '../services/api'
 import { format } from 'date-fns'
-import type { HearthCluster, GpuAllocationStatus } from '../types'
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+import type { HearthCluster, GpuAllocationStatus, ClusterCost } from '../types'
 import GpuDonutChart from '../components/GpuDonutChart'
 
 export default function Dashboard() {
@@ -57,6 +59,42 @@ export default function Dashboard() {
   )
   const gpuStatusLoading = gpuStatusQueries.some((q) => q.isLoading)
   const totalGpus = gpuTotals.total || clusters.reduce((sum, c) => sum + parseInt(c.gpu_count || '0'), 0)
+
+  const ibmClusterIds = clusters.filter((c) => c.provider === 'ibm').map((c) => c.id)
+  const costQueries = useQueries({
+    queries: ibmClusterIds.map((id) => ({
+      queryKey: ['clusterCost', id],
+      queryFn: () => clusterApi.getCost(id),
+      staleTime: 60_000,
+    })),
+  })
+  const costByCluster = ibmClusterIds.reduce<Record<string, ClusterCost | undefined>>((acc, id, i) => {
+    const costs = costQueries[i]?.data as ClusterCost[] | undefined
+    acc[id] = costs?.[0]
+    return acc
+  }, {})
+  const costCurrency = (() => {
+    for (const q of costQueries) {
+      const costs = q.data as ClusterCost[] | undefined
+      if (costs?.[0]?.currency) return costs[0].currency
+    }
+    return 'USD'
+  })()
+
+  const monthlyCostData = (() => {
+    const byMonth: Record<string, number> = {}
+    for (const q of costQueries) {
+      const costs = q.data as ClusterCost[] | undefined
+      if (!costs) continue
+      for (const c of costs) {
+        if (c.error || c.total_cost == null || !c.billing_month) continue
+        byMonth[c.billing_month] = (byMonth[c.billing_month] || 0) + c.total_cost
+      }
+    }
+    return Object.entries(byMonth)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([month, cost]) => ({ month, cost: Math.round(cost) }))
+  })()
 
   const stats = [
     {
@@ -158,6 +196,49 @@ export default function Dashboard() {
             </div>
           </div>
         </Link>
+        {ibmClusterIds.length > 0 && monthlyCostData.length > 0 && (
+          <div className="card p-6 lg:col-span-2">
+            <div className="flex items-center gap-2 mb-3">
+              <CurrencyDollarIcon className="h-5 w-5 text-emerald-600" />
+              <p className="text-sm font-medium text-gray-500">Monthly Cost</p>
+            </div>
+            <ResponsiveContainer width="100%" height={80}>
+              <LineChart data={monthlyCostData} margin={{ top: 4, right: 8, bottom: 0, left: 8 }}>
+                <XAxis
+                  dataKey="month"
+                  tick={{ fontSize: 11, fill: '#9ca3af' }}
+                  axisLine={false}
+                  tickLine={false}
+                />
+                <YAxis
+                  tick={{ fontSize: 11, fill: '#9ca3af' }}
+                  axisLine={false}
+                  tickLine={false}
+                  tickFormatter={(v) => {
+                    const symbol = (0).toLocaleString(undefined, { style: 'currency', currency: costCurrency }).replace(/[\d.,\s]/g, '')
+                    return `${symbol}${(v / 1000).toFixed(0)}k`
+                  }}
+                  width={45}
+                />
+                <Tooltip
+                  formatter={(value) => [
+                    Number(value).toLocaleString(undefined, { style: 'currency', currency: costCurrency, maximumFractionDigits: 0 }),
+                    'Total',
+                  ]}
+                  contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e7eb' }}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="cost"
+                  stroke="#059669"
+                  strokeWidth={2}
+                  dot={{ r: 4, fill: '#059669' }}
+                  activeDot={{ r: 6 }}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
       </div>
 
       {/* GPU Reservation Summary */}
@@ -207,6 +288,7 @@ export default function Dashboard() {
                 )?.data as GpuAllocationStatus | undefined
                 const clusterTotal = gpuData?.total_gpus ?? parseInt(cluster.gpu_count || '0')
                 const clusterUsed = gpuData?.allocated_gpus ?? 0
+                const cost = costByCluster[cluster.id]
 
                 return (
                   <Link
@@ -229,6 +311,11 @@ export default function Dashboard() {
                         <p className="text-sm text-gray-500">
                           {cluster.node_count || '?'} nodes · {clusterUsed}/{clusterTotal} GPUs
                           {cluster.gpu_type && <span className="ml-1">({cluster.gpu_type})</span>}
+                          {cost && !cost.error && cost.total_cost != null && (
+                            <span className="ml-1">
+                              · {cost.total_cost.toLocaleString(undefined, { style: 'currency', currency: cost.currency, maximumFractionDigits: 0 })}
+                            </span>
+                          )}
                         </p>
                       </div>
                     </div>

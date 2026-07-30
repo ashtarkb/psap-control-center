@@ -18,6 +18,7 @@ import {
   LockClosedIcon,
   LockOpenIcon,
   ClockIcon,
+  CurrencyDollarIcon,
 } from '@heroicons/react/24/outline'
 import { useDropzone } from 'react-dropzone'
 import {
@@ -33,6 +34,7 @@ import {
 import { useCurrentClusterUser } from '../hooks/useReservations'
 import { useHearthCluster } from '../hooks/useHearth'
 import { useGpuStatus } from '../hooks/useGpuStatus'
+import { useClusterCosts, useRefreshClusterCost } from '../hooks/useClusterCost'
 import { format } from 'date-fns'
 import clsx from 'clsx'
 import type { TopologyNode, PodInfo } from '../types'
@@ -498,7 +500,9 @@ export default function ClusterDetail() {
   const { data: ocpDetails, isLoading: ocpLoading } = useOcpDetails(id!)
   const { data: operatorsData, isLoading: operatorsLoading } = useClusterOperators(id!)
   const { data: workloads, isLoading: workloadsLoading } = useClusterWorkloads(id!)
-  
+  const { data: costs, isLoading: costsLoading } = useClusterCosts(id!)
+  const refreshCost = useRefreshClusterCost()
+
   const refreshStatus = useRefreshClusterStatus()
   const uploadKubeconfig = useUploadKubeconfig()
 
@@ -778,6 +782,74 @@ export default function ClusterDetail() {
           {gpuStatus.dra_available && (
             <div className="mt-2 text-xs text-gray-500">
               DRA {gpuStatus.dra_api_version} &middot; {gpuStatus.gpu_allocation_mode} mode
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Cost Card */}
+      {cluster.provider === 'ibm' && (
+        <div className="card p-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+              <CurrencyDollarIcon className="h-5 w-5 text-emerald-600" />
+              Cost
+            </h3>
+            <div className="flex items-center gap-3">
+              {costs && costs.length > 0 && costs[0].fetched_at && (
+                <span className="text-xs text-gray-400">
+                  Updated {format(new Date(costs[0].fetched_at), 'MMM d, HH:mm')}
+                </span>
+              )}
+              <button
+                onClick={() => refreshCost.mutate(id!)}
+                disabled={refreshCost.isPending}
+                className="btn-secondary text-sm py-1.5 px-3"
+              >
+                <ArrowPathIcon className={clsx('h-3.5 w-3.5 mr-1.5', refreshCost.isPending && 'animate-spin')} />
+                Refresh
+              </button>
+            </div>
+          </div>
+
+          {costsLoading ? (
+            <div className="text-sm text-gray-400">Loading...</div>
+          ) : (!costs || costs.length === 0) ? (
+            <div className="flex items-start gap-2 text-sm text-orange-600 bg-orange-50 p-3 rounded-lg">
+              <ExclamationTriangleIcon className="h-4 w-4 mt-0.5 flex-shrink-0" />
+              <span>No billing data available</span>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {costs.map((cost) => (
+                <div key={cost.billing_month} className="border border-gray-200 rounded-lg overflow-hidden">
+                  <div className="flex items-center justify-between p-4 bg-emerald-50">
+                    <p className="text-sm font-medium text-gray-600">{cost.billing_month}</p>
+                    <p className="text-xl font-bold text-emerald-700">
+                      {cost.total_cost != null
+                        ? cost.total_cost.toLocaleString(undefined, { style: 'currency', currency: cost.currency })
+                        : '—'}
+                    </p>
+                  </div>
+                  {cost.node_breakdown && cost.node_breakdown.length > 0 && (
+                    <div className="p-3 space-y-1">
+                      {cost.node_breakdown.map((n) => (
+                        <div key={n.node} className="flex items-center justify-between text-sm p-1.5">
+                          <span className="font-mono text-xs text-gray-700 truncate">{n.node}</span>
+                          <span className="font-medium text-gray-900">
+                            {n.cost.toLocaleString(undefined, { style: 'currency', currency: cost.currency })}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {cost.error && (
+                    <div className="px-4 py-2 text-xs text-orange-600 bg-orange-50 border-t border-orange-100">
+                      {cost.error}
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </div>

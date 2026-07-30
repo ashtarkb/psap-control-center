@@ -6,8 +6,10 @@ from datetime import datetime
 import os
 
 from app.models.cluster import Cluster, CLUSTER_COLORS
+from app.models.cluster_cost import ClusterCost
 from app.schemas.cluster import ClusterCreate, ClusterUpdate, ClusterStatus
 from app.services.kubernetes_service import KubernetesService
+from app.services import billing_csv_service
 from app.core.config import settings
 from app.utils.logger import create_logger
 
@@ -78,7 +80,9 @@ class ClusterService:
         if kubeconfig_path:
             await self.refresh_cluster_status(cluster.id)
             await self.db.refresh(cluster)
-        
+            if cluster.infra_id:
+                await self.refresh_cluster_cost(cluster.id)
+
         return cluster
 
     async def get_cluster(self, cluster_id: str) -> Optional[Cluster]:
@@ -226,6 +230,15 @@ class ClusterService:
                 cluster.gpu_count = cluster_info.get("gpu_count")
                 cluster.gpu_type = cluster_info.get("gpu_type")
 
+            if not cluster.infra_id:
+                try:
+                    infra_id = await self._run_in_thread(k8s_service.get_infra_id, executor)
+                    if infra_id:
+                        cluster.infra_id = infra_id
+                        logger.info(f"Auto-detected infra_id for {cluster.name}: {infra_id}")
+                except Exception as e:
+                    logger.debug(f"Could not detect infra_id for {cluster.name}: {e}")
+
             await self.db.commit()
             await self.db.refresh(cluster)
 
@@ -300,5 +313,82 @@ class ClusterService:
         
         await self.refresh_cluster_status(cluster_id)
         await self.db.refresh(cluster)
-        
+
         return cluster
+
+    async def _get_or_create_cost_row(self, cluster_id: str, billing_month: str) -> ClusterCost:
+        result = await self.db.execute(
+            select(ClusterCost).where(
+                ClusterCost.cluster_id == cluster_id,
+                ClusterCost.billing_month == billing_month,
+            )
+        )
+        cost_row = result.scalar_one_or_none()
+        if not cost_row:
+            cost_row = ClusterCost(cluster_id=cluster_id, billing_month=billing_month)
+            self.db.add(cost_row)
+        return cost_row
+
+    async def refresh_cluster_cost(
+        self,
+        cluster_id: str,
+        csv_path: Optional[str] = None,
+        rows: Optional[list] = None,
+        tag_ids: Optional[list] = None,
+    ) -> List[ClusterCost]:
+        """Refresh cost data for a cluster from all available CSVs (or a specific one)."""
+        cluster = await self.get_cluster(cluster_id)
+        if not cluster:
+            return []
+
+        if not cluster.infra_id:
+            return []
+
+        if csv_path:
+            report_files = [(csv_path, rows, tag_ids)]
+        else:
+            reports = billing_csv_service.get_available_reports()
+            if not reports:
+                return []
+            report_files = [(r["file_path"], None, None) for r in reports]
+
+        updated = []
+        for rpath, rrows, rtags in report_files:
+            try:
+                parsed_rows = rrows if rrows is not None else billing_csv_service.parse_billing_csv(rpath)
+                parsed_tags = rtags if rtags is not None else billing_csv_service._read_cluster_ids_from_header(rpath)
+                match_id = billing_csv_service.resolve_billing_id(
+                    cluster.infra_id, parsed_rows, parsed_tags, cluster.name
+                )
+                result = billing_csv_service.get_cluster_cost(match_id, rpath, rows=parsed_rows)
+
+                no_match = (
+                    result.total_cost == 0
+                    and not result.node_breakdown
+                    and not result.unmatched_line_items
+                )
+
+                cost_row = await self._get_or_create_cost_row(cluster_id, result.billing_month)
+                cost_row.currency = result.currency
+                cost_row.total_cost = None if no_match else result.total_cost
+                cost_row.node_breakdown = result.node_breakdown
+                cost_row.unmatched_line_items = result.unmatched_line_items
+                cost_row.fetched_at = datetime.utcnow()
+                cost_row.error = (
+                    "No matching billing data found for this cluster's infrastructure ID"
+                    if no_match else None
+                )
+                updated.append(cost_row)
+            except Exception as e:
+                logger.error(f"Cost extraction failed for cluster {cluster_id} from {rpath}: {e}")
+
+        await self.db.commit()
+        return updated
+
+    async def get_cluster_costs(self, cluster_id: str) -> List[ClusterCost]:
+        result = await self.db.execute(
+            select(ClusterCost)
+            .where(ClusterCost.cluster_id == cluster_id)
+            .order_by(ClusterCost.billing_month.desc())
+        )
+        return list(result.scalars().all())

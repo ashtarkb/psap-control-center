@@ -1,14 +1,15 @@
 import axios from 'axios'
-import type { 
-  Cluster, 
-  ClusterStatus, 
-  ClusterListResponse, 
+import type {
+  Cluster,
+  ClusterStatus,
+  ClusterListResponse,
   ClusterTopology,
   OcpDetails,
   Operator,
   WorkloadsResponse,
   GpuAllocationStatus,
-  Reservation, 
+  ClusterCost,
+  Reservation,
   ReservationListResponse,
   CalendarEvent,
   ClusterOccupancyResponse,
@@ -16,6 +17,8 @@ import type {
   HearthClusterListResponse,
   HearthStatus,
   HearthConnectResponse,
+  BillingReport,
+  CostRefreshStatus,
 } from '../types'
 import { createLogger } from '../utils/logger'
 import { clearSession } from '../stores/authStore'
@@ -160,6 +163,16 @@ export const clusterApi = {
   }> => {
     const { data } = await api.get(`/clusters/${id}/gpu-pod-history`, { params: { limit } })
     return data
+  },
+
+  getCost: async (id: string): Promise<ClusterCost[]> => {
+    const { data } = await api.get(`/clusters/${id}/cost`)
+    return data.costs
+  },
+
+  refreshCost: async (id: string): Promise<ClusterCost[]> => {
+    const { data } = await api.post(`/clusters/${id}/cost/refresh`)
+    return data.costs
   },
 
   getRefreshSchedule: async (): Promise<{
@@ -314,6 +327,32 @@ export const settingsApi = {
 
   testSlack: async (): Promise<{ status: string; message: string }> => {
     const { data } = await api.post('/settings/slack/test')
+    return data
+  },
+}
+
+export const billingApi = {
+  upload: async (file: File, autoRefresh = true): Promise<BillingReport> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const { data } = await api.post('/billing/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      params: { auto_refresh: autoRefresh },
+    })
+    return data
+  },
+
+  listReports: async (): Promise<{ reports: BillingReport[] }> => {
+    const { data } = await api.get('/billing/reports')
+    return data
+  },
+
+  deleteReport: async (billingMonth: string): Promise<void> => {
+    await api.delete(`/billing/${billingMonth}`)
+  },
+
+  getCostRefreshStatus: async (): Promise<CostRefreshStatus> => {
+    const { data } = await api.get('/billing/cost-refresh-status')
     return data
   },
 }

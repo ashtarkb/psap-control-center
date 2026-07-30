@@ -21,7 +21,7 @@ import { clusterApi } from '../services/api'
 import { format } from 'date-fns'
 import toast from 'react-hot-toast'
 import clsx from 'clsx'
-import type { GpuAllocationStatus } from '../types'
+import type { GpuAllocationStatus, ClusterCost } from '../types'
 import GpuDonutChart from '../components/GpuDonutChart'
 import { isAdmin } from '../stores/authStore'
 
@@ -183,6 +183,20 @@ export default function Clusters() {
   })
   const gpuHistoryByCluster = clusters.reduce<Record<string, Array<{ name: string; namespace: string; gpu_count: number; node?: string; finished_at: string }>>>((acc, c, i) => {
     acc[c.id] = (gpuHistoryQueries[i]?.data as { pods: typeof acc[string] } | undefined)?.pods || []
+    return acc
+  }, {})
+
+  const costQueries = useQueries({
+    queries: clusters.map((c) => ({
+      queryKey: ['clusterCost', c.id],
+      queryFn: () => clusterApi.getCost(c.id),
+      enabled: c.provider === 'ibm',
+      staleTime: 60_000,
+    })),
+  })
+  const costsByCluster = clusters.reduce<Record<string, ClusterCost[]>>((acc, c, i) => {
+    const costs = costQueries[i]?.data as ClusterCost[] | undefined
+    acc[c.id] = costs || []
     return acc
   }, {})
 
@@ -480,6 +494,31 @@ export default function Clusters() {
                           </p>
                         </div>
                       </div>
+                    </div>
+                  )
+                })()}
+
+                {(() => {
+                  const costs = costsByCluster[cluster.id]
+                  if (!costs || costs.length === 0) return null
+                  const valid = costs.filter((c) => !c.error && c.total_cost != null)
+                  if (valid.length === 0) {
+                    return (
+                      <div className="mt-4 pt-4 border-t border-gray-100 text-sm text-gray-400">
+                        No billing data
+                      </div>
+                    )
+                  }
+                  return (
+                    <div className="mt-4 pt-4 border-t border-gray-100 space-y-1 text-sm">
+                      {valid.map((cost) => (
+                        <div key={cost.billing_month} className="flex items-center justify-between">
+                          <span className="text-gray-400">{cost.billing_month}</span>
+                          <span className="font-semibold text-gray-900">
+                            {cost.total_cost!.toLocaleString(undefined, { style: 'currency', currency: cost.currency })}
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   )
                 })()}

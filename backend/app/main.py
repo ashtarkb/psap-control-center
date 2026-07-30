@@ -27,6 +27,13 @@ cluster_refresh_state = {
     "completed": 0,
 }
 
+cost_refresh_state = {
+    "in_progress": False,
+    "total": 0,
+    "completed": 0,
+    "last_cluster": None,
+}
+
 
 async def global_exception_handler(request: Request, exc: Exception):
     """Global exception handler to prevent raw exception details from leaking to clients."""
@@ -155,9 +162,9 @@ async def lifespan(app: FastAPI):
 
     refresh_task = asyncio.create_task(cluster_refresh_task())
     logger.info("Cluster auto-refresh task started (every 10 min)")
-    
+
     yield
-    
+
     # Cleanup
     status_task.cancel()
     refresh_task.cancel()

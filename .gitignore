@@ -30,6 +30,9 @@ data/
 kubeconfigs/
 *.kubeconfig
 
+# Billing CSVs (uploaded data)
+billing_csvs/
+
 # Logs
 *.log
 logs/

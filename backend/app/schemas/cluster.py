@@ -69,6 +69,8 @@ class ClusterResponse(ClusterBase):
     api_server_url: Optional[str] = None
     status: str
     color: str = "#0891b2"
+    provider: str = "ibm"
+    infra_id: Optional[str] = None
     last_health_check: Optional[datetime] = None
     node_count: Optional[str] = None
     gpu_count: Optional[str] = None
@@ -87,3 +89,38 @@ class ClusterResponse(ClusterBase):
 class ClusterListResponse(BaseModel):
     clusters: List[ClusterResponse]
     total: int
+
+
+class NodeCostInfo(BaseModel):
+    node: str
+    instance_name: Optional[str] = None
+    cost: float
+    service: Optional[str] = None
+
+
+class BillingReportInfo(BaseModel):
+    billing_month: str
+    file_name: str
+    file_size: int
+    uploaded_at: datetime
+    cluster_count: int
+
+
+class BillingReportListResponse(BaseModel):
+    reports: List[BillingReportInfo]
+
+
+class ClusterCostResponse(BaseModel):
+    currency: str = "USD"
+    billing_month: Optional[str] = None
+    total_cost: Optional[float] = None
+    node_breakdown: Optional[List[NodeCostInfo]] = None
+    fetched_at: Optional[datetime] = None
+    error: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ClusterCostListResponse(BaseModel):
+    costs: List[ClusterCostResponse]

@@ -5,6 +5,8 @@ export interface Cluster {
   api_server_url?: string
   status: string
   color: string
+  provider: string
+  infra_id?: string
   last_health_check?: string
   node_count?: string
   gpu_count?: string
@@ -146,6 +148,36 @@ export interface ClusterOccupancyResponse {
 export interface ClusterListResponse {
   clusters: Cluster[]
   total: number
+}
+
+export interface NodeCostInfo {
+  node: string
+  instance_name?: string
+  cost: number
+  service?: string
+}
+
+export interface ClusterCost {
+  currency: string
+  billing_month?: string
+  total_cost?: number
+  node_breakdown?: NodeCostInfo[]
+  fetched_at?: string
+  error?: string
+}
+export interface BillingReport {
+  billing_month: string
+  file_name: string
+  file_size: number
+  uploaded_at: string
+  cluster_count: number
+}
+
+export interface CostRefreshStatus {
+  in_progress: boolean
+  total: number
+  completed: number
+  last_cluster: string | null
 }
 
 export interface ReservationListResponse {

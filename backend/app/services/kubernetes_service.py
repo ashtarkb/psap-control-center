@@ -190,6 +190,17 @@ class KubernetesService:
             logger.error("Error getting cluster info:", e)
             return {"status": "unreachable", "error": str(e)}
 
+    def get_infra_id(self) -> Optional[str]:
+        """Return the OpenShift infrastructureName (e.g. 'diadochos-hqxzk'),
+        used as a join key for IBM Cloud billing CSV data."""
+        try:
+            infra = self.custom_objects.get_cluster_custom_object(
+                "config.openshift.io", "v1", "infrastructures", "cluster"
+            )
+            return infra.get("status", {}).get("infrastructureName")
+        except Exception:
+            return None
+
     def _get_node_status(self, node) -> str:
         for condition in node.status.conditions:
             if condition.type == "Ready":

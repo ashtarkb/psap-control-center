@@ -12,6 +12,8 @@ from app.schemas.cluster import (
     ClusterResponse,
     ClusterStatus,
     ClusterListResponse,
+    ClusterCostResponse,
+    ClusterCostListResponse,
     GpuAllocationStatus as GpuAllocationStatusSchema,
 )
 from app.utils.logger import create_logger
@@ -504,3 +506,41 @@ async def get_cluster_workloads(
         return workloads
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{cluster_id}/cost", response_model=ClusterCostListResponse)
+async def get_cluster_cost(
+    cluster_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get cached cost data for all billing months."""
+    service = ClusterService(db)
+    cluster = await service.get_cluster(cluster_id)
+
+    if not cluster:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+
+    costs = await service.get_cluster_costs(cluster_id)
+    return ClusterCostListResponse(
+        costs=[ClusterCostResponse.model_validate(c) for c in costs]
+    )
+
+
+@router.post("/{cluster_id}/cost/refresh", response_model=ClusterCostListResponse)
+async def refresh_cluster_cost(
+    cluster_id: str,
+    db: AsyncSession = Depends(get_db),
+    _user: dict = Depends(require_admin),
+):
+    """Refresh cost data for a cluster from all uploaded billing CSVs."""
+    service = ClusterService(db)
+    cluster = await service.get_cluster(cluster_id)
+
+    if not cluster:
+        raise HTTPException(status_code=404, detail="Cluster not found")
+
+    await service.refresh_cluster_cost(cluster_id)
+    costs = await service.get_cluster_costs(cluster_id)
+    return ClusterCostListResponse(
+        costs=[ClusterCostResponse.model_validate(c) for c in costs]
+    )

@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Routes, Route, Navigate, Link } from 'react-router-dom'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
@@ -25,7 +25,8 @@ function NotFound() {
 }
 
 function App() {
-  const syncAuth = useCallback(() => {}, [])
+  const [, setAuthTick] = useState(0)
+  const syncAuth = useCallback(() => setAuthTick(t => t + 1), [])
 
   useEffect(() => {
     window.addEventListener('auth-change', syncAuth)

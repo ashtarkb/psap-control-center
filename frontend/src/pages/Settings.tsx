@@ -1,12 +1,16 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   EyeIcon,
   EyeSlashIcon,
   PaperAirplaneIcon,
   CheckCircleIcon,
   XCircleIcon,
+  ArrowUpTrayIcon,
+  TrashIcon,
+  DocumentTextIcon,
 } from '@heroicons/react/24/outline'
 import { useSlackSettings, useUpdateSlackSettings, useTestSlack } from '../hooks/useSettings'
+import { useBillingReports, useUploadBillingCsv, useDeleteBillingReport, useCostRefreshStatus } from '../hooks/useBilling'
 
 export default function Settings() {
   const { data: slackSettings, isLoading, isError, error } = useSlackSettings()
@@ -148,6 +152,151 @@ export default function Settings() {
               )}
             </div>
           </div>
+        </div>
+      </div>
+      <BillingCsvCard />
+    </div>
+  )
+}
+
+
+function BillingCsvCard() {
+  const { data, isLoading } = useBillingReports()
+  const uploadMutation = useUploadBillingCsv()
+  const deleteMutation = useDeleteBillingReport()
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [autoRefresh, setAutoRefresh] = useState(true)
+  const { data: refreshStatus } = useCostRefreshStatus(autoRefresh)
+
+  const reports = data?.reports ?? []
+
+  const handleUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      uploadMutation.mutate({ file, autoRefresh })
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  const formatSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  }
+
+  return (
+    <div className="card">
+      <div className="p-6">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="h-10 w-10 rounded-lg bg-blue-600 flex items-center justify-center">
+              <DocumentTextIcon className="h-5 w-5 text-white" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 font-display">Billing Reports</h2>
+              <p className="text-sm text-gray-500">
+                Upload IBM Cloud billing CSV exports for cluster cost tracking.
+              </p>
+            </div>
+          </div>
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-600">
+            {reports.length} report{reports.length !== 1 ? 's' : ''}
+          </span>
+        </div>
+
+        <div className="mt-6 space-y-4">
+          <div>
+            <div className="flex items-center gap-4">
+              <div>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".csv"
+                  onChange={handleUpload}
+                  className="hidden"
+                  id="billing-csv-upload"
+                />
+                <label
+                  htmlFor="billing-csv-upload"
+                  className="btn-primary inline-flex items-center cursor-pointer"
+                >
+                  <ArrowUpTrayIcon className="h-4 w-4 mr-1.5" />
+                  {uploadMutation.isPending ? 'Uploading...' : 'Upload CSV'}
+                </label>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={autoRefresh}
+                  onChange={(e) => setAutoRefresh(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                Auto-refresh cluster costs
+              </label>
+            </div>
+            <p className="mt-1.5 text-xs text-gray-500">
+              Download the billing CSV from IBM Cloud Console &rarr; Billing &rarr; Usage &rarr; Export &rarr; Instances.
+            </p>
+          </div>
+
+          {refreshStatus?.in_progress && (
+            <div className="flex items-center gap-2 text-sm text-blue-700 bg-blue-50 border border-blue-200 p-3 rounded-lg">
+              <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Refreshing cluster costs... ({refreshStatus.completed}/{refreshStatus.total})
+              {refreshStatus.last_cluster && <span className="text-blue-500">— {refreshStatus.last_cluster}</span>}
+            </div>
+          )}
+
+          {uploadMutation.isError && (
+            <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-800">
+              Upload failed: {uploadMutation.error instanceof Error ? uploadMutation.error.message : 'Unknown error'}
+            </div>
+          )}
+
+          {isLoading ? (
+            <div className="text-sm text-gray-400">Loading reports...</div>
+          ) : reports.length > 0 ? (
+            <div className="border border-gray-200 rounded-lg overflow-hidden">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Month</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Clusters</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Size</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Uploaded</th>
+                    <th className="px-4 py-2"></th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {reports.map((r) => (
+                    <tr key={r.billing_month}>
+                      <td className="px-4 py-2.5 text-sm font-medium text-gray-900">{r.billing_month}</td>
+                      <td className="px-4 py-2.5 text-sm text-gray-600">{r.cluster_count}</td>
+                      <td className="px-4 py-2.5 text-sm text-gray-600">{formatSize(r.file_size)}</td>
+                      <td className="px-4 py-2.5 text-sm text-gray-500">
+                        {new Date(r.uploaded_at).toLocaleDateString()}
+                      </td>
+                      <td className="px-4 py-2.5 text-right">
+                        <button
+                          onClick={() => deleteMutation.mutate(r.billing_month)}
+                          disabled={deleteMutation.isPending}
+                          className="text-gray-400 hover:text-red-600 transition-colors"
+                          title="Delete report"
+                        >
+                          <TrashIcon className="h-4 w-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="text-sm text-gray-400">No billing reports uploaded yet.</div>
+          )}
         </div>
       </div>
     </div>
