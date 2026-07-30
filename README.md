@@ -44,7 +44,7 @@ docker-compose up -d
 # Backend
 cd backend
 python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ADMIN_USERNAME=admin ADMIN_PASSWORD=admin \
   uvicorn app.main:app --reload
 
