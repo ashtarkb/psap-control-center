@@ -16,11 +16,16 @@ if settings.DATABASE_URL.startswith("sqlite"):
     connect_args["check_same_thread"] = False
     connect_args["timeout"] = 30
 
+_pool_kwargs = {}
+if not settings.DATABASE_URL.startswith("sqlite"):
+    _pool_kwargs = {"pool_size": 20, "max_overflow": 10}
+
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     connect_args=connect_args,
     pool_pre_ping=True,
+    **_pool_kwargs,
 )
 
 

@@ -24,12 +24,11 @@ async def sync_gpu_pods(
         (p["namespace"], p["name"]) for p in active_pods
     }
 
+    # Fetch ALL records for this cluster (including finished) so we can
+    # detect re-appeared pods instead of hitting the unique constraint.
     result = await db.execute(
         select(GpuPodHistory).where(
-            and_(
-                GpuPodHistory.cluster_id == cluster_id,
-                GpuPodHistory.finished_at.is_(None),
-            )
+            GpuPodHistory.cluster_id == cluster_id,
         )
     )
     existing: List[GpuPodHistory] = list(
@@ -40,7 +39,7 @@ async def sync_gpu_pods(
     }
 
     for key, record in existing_by_key.items():
-        if key not in active_keys:
+        if key not in active_keys and record.finished_at is None:
             record.finished_at = now
             record.last_seen = now
 
@@ -48,6 +47,9 @@ async def sync_gpu_pods(
         key = (pod["namespace"], pod["name"])
         if key in existing_by_key:
             record = existing_by_key[key]
+            if record.finished_at is not None:
+                record.finished_at = None
+                record.first_seen = now
             record.last_seen = now
             record.gpu_count = pod["gpu_count"]
             record.node = pod.get("node")
