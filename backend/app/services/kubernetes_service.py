@@ -18,7 +18,7 @@ DRA_VERSION_PREFERENCE = ["v1", "v1beta2", "v1beta1"]
 DRA_GPU_DRIVER_NAMES = ["gpu.nvidia.com", "gpu.intel.com", "gpu.amd.com"]
 DRA_CONFIGMAP_NAME = "gpu-fleet-viewer-config"
 DRA_CONFIGMAP_NAMESPACE = "gpu-fleet-viewer"
-K8S_API_TIMEOUT = 20
+K8S_API_TIMEOUT = 120
 
 
 @dataclass
@@ -79,6 +79,7 @@ class KubernetesService:
         self._version_api = None
         self._custom_objects = None
         self._configuration = None
+        self._load_config()
 
     def _load_config(self):
         if not os.path.exists(self.kubeconfig_path):
@@ -92,6 +93,7 @@ class KubernetesService:
             client_configuration=self._configuration
         )
         self._configuration.retries = 1
+        self._configuration.verify_ssl = False
 
         self._apply_proxy_if_needed()
         
@@ -139,8 +141,12 @@ class KubernetesService:
 
     def get_cluster_info(self) -> Dict[str, Any]:
         try:
-            version_info = self.version_api.get_code()
-            nodes = self.core_v1.list_node()
+            version_info = self.version_api.get_code(
+                _request_timeout=K8S_API_TIMEOUT
+            )
+            nodes = self.core_v1.list_node(
+                _request_timeout=K8S_API_TIMEOUT
+            )
 
             gpu_count = 0
             node_details = []
@@ -195,7 +201,8 @@ class KubernetesService:
         used as a join key for IBM Cloud billing CSV data."""
         try:
             infra = self.custom_objects.get_cluster_custom_object(
-                "config.openshift.io", "v1", "infrastructures", "cluster"
+                "config.openshift.io", "v1", "infrastructures", "cluster",
+                _request_timeout=K8S_API_TIMEOUT,
             )
             return infra.get("status", {}).get("infrastructureName")
         except Exception:
@@ -234,7 +241,9 @@ class KubernetesService:
 
     def get_namespaces(self) -> List[str]:
         try:
-            namespaces = self.core_v1.list_namespace()
+            namespaces = self.core_v1.list_namespace(
+                _request_timeout=K8S_API_TIMEOUT
+            )
             return [ns.metadata.name for ns in namespaces.items]
         except Exception as e:
             logger.error("Error getting namespaces:", e)
@@ -242,8 +251,12 @@ class KubernetesService:
 
     def get_resource_usage(self) -> Dict[str, Any]:
         try:
-            nodes = self.core_v1.list_node()
-            pods = self.core_v1.list_pod_for_all_namespaces()
+            nodes = self.core_v1.list_node(
+                _request_timeout=K8S_API_TIMEOUT
+            )
+            pods = self.core_v1.list_pod_for_all_namespaces(
+                _request_timeout=K8S_API_TIMEOUT
+            )
             
             total_cpu_capacity = 0
             total_memory_capacity = 0
@@ -297,7 +310,7 @@ class KubernetesService:
 
     def check_health(self) -> bool:
         try:
-            self.version_api.get_code()
+            self.version_api.get_code(_request_timeout=K8S_API_TIMEOUT)
             return True
         except Exception:
             return False
@@ -309,7 +322,9 @@ class KubernetesService:
         try:
             if self._api_client is None:
                 self._load_config()
-            api_groups = client.ApisApi(self._api_client).get_api_versions()
+            api_groups = client.ApisApi(self._api_client).get_api_versions(
+                _request_timeout=K8S_API_TIMEOUT
+            )
             dra_versions = set()
             for group in api_groups.groups:
                 if group.name == DRA_API_GROUP:
@@ -340,7 +355,8 @@ class KubernetesService:
         try:
             cm = self.core_v1.read_namespaced_config_map(
                 name=DRA_CONFIGMAP_NAME,
-                namespace=DRA_CONFIGMAP_NAMESPACE
+                namespace=DRA_CONFIGMAP_NAMESPACE,
+                _request_timeout=K8S_API_TIMEOUT,
             )
             data = cm.data or {}
             if "gpu_resource_name" in data:
@@ -741,7 +757,8 @@ class KubernetesService:
             return []
         try:
             result = self.custom_objects.list_cluster_custom_object(
-                group=DRA_API_GROUP, version=dra_version, plural="deviceclasses"
+                group=DRA_API_GROUP, version=dra_version, plural="deviceclasses",
+                _request_timeout=K8S_API_TIMEOUT,
             )
             return [dc["metadata"]["name"] for dc in result.get("items", [])]
         except Exception as e:
@@ -751,8 +768,12 @@ class KubernetesService:
     def get_topology(self) -> Dict[str, Any]:
         """Get cluster topology with detailed node information for visualization."""
         try:
-            nodes = self.core_v1.list_node()
-            pods = self.core_v1.list_pod_for_all_namespaces()
+            nodes = self.core_v1.list_node(
+                _request_timeout=K8S_API_TIMEOUT
+            )
+            pods = self.core_v1.list_pod_for_all_namespaces(
+                _request_timeout=K8S_API_TIMEOUT
+            )
             
             # Group pods by node
             pods_by_node = {}
@@ -875,7 +896,8 @@ class KubernetesService:
                     group="config.openshift.io",
                     version="v1",
                     plural="clusterversions",
-                    name="version"
+                    name="version",
+                    _request_timeout=K8S_API_TIMEOUT,
                 )
                 ocp_details["cluster_version"] = cv.get("status", {}).get("desired", {}).get("version")
                 ocp_details["cluster_id"] = cv.get("spec", {}).get("clusterID")
@@ -901,7 +923,8 @@ class KubernetesService:
                     group="config.openshift.io",
                     version="v1",
                     plural="infrastructures",
-                    name="cluster"
+                    name="cluster",
+                    _request_timeout=K8S_API_TIMEOUT,
                 )
                 ocp_details["platform"] = infra.get("status", {}).get("platform")
                 ocp_details["infrastructure"] = infra.get("status", {}).get("infrastructureName")
@@ -916,7 +939,8 @@ class KubernetesService:
                     group="config.openshift.io",
                     version="v1",
                     plural="networks",
-                    name="cluster"
+                    name="cluster",
+                    _request_timeout=K8S_API_TIMEOUT,
                 )
                 ocp_details["network_type"] = network.get("status", {}).get("networkType")
                 ocp_details["cluster_network"] = network.get("status", {}).get("clusterNetwork", [])
@@ -930,7 +954,8 @@ class KubernetesService:
                     group="config.openshift.io",
                     version="v1",
                     plural="ingresses",
-                    name="cluster"
+                    name="cluster",
+                    _request_timeout=K8S_API_TIMEOUT,
                 )
                 ocp_details["ingress_domain"] = ingress.get("spec", {}).get("domain")
             except Exception as e:
@@ -957,7 +982,8 @@ class KubernetesService:
                 csvs = custom_api.list_cluster_custom_object(
                     group="operators.coreos.com",
                     version="v1alpha1",
-                    plural="clusterserviceversions"
+                    plural="clusterserviceversions",
+                    _request_timeout=K8S_API_TIMEOUT,
                 )
                 
                 seen = set()
@@ -990,11 +1016,14 @@ class KubernetesService:
             pods_list = []
             deployments_list = []
             
-            # Get pods
             if namespace:
-                pods = self.core_v1.list_namespaced_pod(namespace)
+                pods = self.core_v1.list_namespaced_pod(
+                    namespace, _request_timeout=K8S_API_TIMEOUT
+                )
             else:
-                pods = self.core_v1.list_pod_for_all_namespaces()
+                pods = self.core_v1.list_pod_for_all_namespaces(
+                    _request_timeout=K8S_API_TIMEOUT
+                )
             
             for pod in pods.items:
                 # Skip system pods for cleaner view unless specifically requested
@@ -1018,9 +1047,13 @@ class KubernetesService:
             # Get deployments
             apps_v1 = client.AppsV1Api(self._api_client)
             if namespace:
-                deployments = apps_v1.list_namespaced_deployment(namespace)
+                deployments = apps_v1.list_namespaced_deployment(
+                    namespace, _request_timeout=K8S_API_TIMEOUT
+                )
             else:
-                deployments = apps_v1.list_deployment_for_all_namespaces()
+                deployments = apps_v1.list_deployment_for_all_namespaces(
+                    _request_timeout=K8S_API_TIMEOUT
+                )
             
             for dep in deployments.items:
                 ns = dep.metadata.namespace

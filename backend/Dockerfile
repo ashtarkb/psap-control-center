@@ -11,9 +11,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /app/kubeconfigs
+RUN mkdir -p /app/kubeconfigs /app/billing_csvs && \
+    chmod 0775 /app/kubeconfigs /app/billing_csvs
 
 ENV KUBECONFIG_STORAGE_PATH=/app/kubeconfigs
+ENV BILLING_CSV_STORAGE_PATH=/app/billing_csvs
 ENV DATABASE_URL=sqlite+aiosqlite:///./data/pasp_control_center.db
 
 EXPOSE 8000

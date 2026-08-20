@@ -1,4 +1,5 @@
 import asyncio
+import time
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Optional
@@ -202,14 +203,54 @@ class ClusterService:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(executor, fn)
 
-    async def refresh_cluster_status(self, cluster_id: str, executor=None) -> Optional[ClusterStatus]:
+    async def refresh_cluster_status(self, cluster_id: str, executor=None, on_progress=None) -> Optional[ClusterStatus]:
         cluster = await self.get_cluster(cluster_id)
         if not cluster or not cluster.kubeconfig_path:
             return None
 
+        refresh_start = time.monotonic()
+
         try:
             k8s_service = KubernetesService(cluster.kubeconfig_path)
-            cluster_info = await self._run_in_thread(k8s_service.get_cluster_info, executor)
+
+            timings = {}
+
+            async def _track(name, coro):
+                """Await a K8s call; record timing and signal progress on success."""
+                t0 = time.monotonic()
+                try:
+                    result = await coro
+                    timings[name] = ("ok", time.monotonic() - t0)
+                    if on_progress:
+                        on_progress()
+                    return result
+                except Exception as e:
+                    timings[name] = ("FAIL", time.monotonic() - t0)
+                    raise
+
+            tasks = {
+                "info": _track("info", self._run_in_thread(k8s_service.get_cluster_info, executor)),
+                "gpu": _track("gpu", self._run_in_thread(k8s_service.get_gpu_allocation, executor)),
+                "ns": _track("ns", self._run_in_thread(k8s_service.get_namespaces, executor)),
+                "usage": _track("usage", self._run_in_thread(k8s_service.get_resource_usage, executor)),
+            }
+            if not cluster.infra_id:
+                tasks["infra"] = _track("infra", self._run_in_thread(k8s_service.get_infra_id, executor))
+
+            results = await asyncio.gather(
+                *tasks.values(), return_exceptions=True
+            )
+
+            wall = time.monotonic() - refresh_start
+            parts = " | ".join(
+                f"{k}={v:.1f}s({s})" for k, (s, v) in sorted(timings.items())
+            )
+            logger.info(f"Refresh [{cluster.name}] wall={wall:.1f}s  {parts}")
+            by_name = dict(zip(tasks.keys(), results))
+
+            cluster_info = by_name["info"] if not isinstance(by_name["info"], Exception) else {}
+            if isinstance(by_name["info"], Exception):
+                logger.warning(f"get_cluster_info failed: {by_name['info']}")
 
             cluster.status = cluster_info.get("status", "unknown")
             cluster.node_count = cluster_info.get("node_count")
@@ -217,33 +258,32 @@ class ClusterService:
             cluster.api_server_url = cluster_info.get("api_server") or cluster.api_server_url
             cluster.last_health_check = datetime.utcnow()
 
-            try:
-                gpu_alloc = await self._run_in_thread(k8s_service.get_gpu_allocation, executor)
+            gpu_alloc = by_name["gpu"]
+            if isinstance(gpu_alloc, Exception):
+                logger.warning(f"GPU allocation probe failed: {gpu_alloc}")
+                cluster.gpu_count = cluster_info.get("gpu_count")
+                cluster.gpu_type = cluster_info.get("gpu_type")
+            else:
                 cluster.gpu_allocation_mode = gpu_alloc.gpu_allocation_mode
                 cluster.gpu_count = str(gpu_alloc.total_gpus)
                 cluster.gpu_type = (
                     gpu_alloc.gpu_types[0].product
                     if gpu_alloc.gpu_types else None
                 )
-            except Exception as e:
-                logger.warning(f"GPU allocation probe failed: {e}")
-                cluster.gpu_count = cluster_info.get("gpu_count")
-                cluster.gpu_type = cluster_info.get("gpu_type")
 
-            if not cluster.infra_id:
-                try:
-                    infra_id = await self._run_in_thread(k8s_service.get_infra_id, executor)
-                    if infra_id:
-                        cluster.infra_id = infra_id
-                        logger.info(f"Auto-detected infra_id for {cluster.name}: {infra_id}")
-                except Exception as e:
-                    logger.debug(f"Could not detect infra_id for {cluster.name}: {e}")
+            if "infra" in by_name:
+                infra_id = by_name["infra"]
+                if isinstance(infra_id, Exception):
+                    logger.debug(f"Could not detect infra_id for {cluster.name}: {infra_id}")
+                elif infra_id:
+                    cluster.infra_id = infra_id
+                    logger.info(f"Auto-detected infra_id for {cluster.name}: {infra_id}")
 
             await self.db.commit()
             await self.db.refresh(cluster)
 
-            namespaces = await self._run_in_thread(k8s_service.get_namespaces, executor)
-            resource_usage = await self._run_in_thread(k8s_service.get_resource_usage, executor)
+            namespaces = by_name["ns"] if not isinstance(by_name["ns"], Exception) else []
+            resource_usage = by_name["usage"] if not isinstance(by_name["usage"], Exception) else {}
 
             return ClusterStatus(
                 status=cluster.status,

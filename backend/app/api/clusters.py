@@ -1,3 +1,6 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
@@ -20,6 +23,14 @@ from app.utils.logger import create_logger
 
 router = APIRouter()
 logger = create_logger("ClustersAPI")
+
+_k8s_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="k8s-api")
+
+
+async def _run_in_thread(fn, *args):
+    """Run a blocking K8s call on the thread pool so the event loop stays free."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_k8s_executor, fn, *args)
 
 
 @router.get("/refresh-schedule")
@@ -343,7 +354,7 @@ async def get_cluster_topology(
     
     try:
         k8s_service = KubernetesService(cluster.kubeconfig_path)
-        topology = k8s_service.get_topology()
+        topology = await _run_in_thread(k8s_service.get_topology)
         return topology
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -366,7 +377,7 @@ async def get_gpu_status(
 
     try:
         k8s_service = KubernetesService(cluster.kubeconfig_path)
-        allocation = k8s_service.get_gpu_allocation()
+        allocation = await _run_in_thread(k8s_service.get_gpu_allocation)
 
         # Persist GPU pod sightings so we can show history later
         from app.services.gpu_pod_history_service import sync_gpu_pods
@@ -455,7 +466,7 @@ async def get_ocp_details(
     
     try:
         k8s_service = KubernetesService(cluster.kubeconfig_path)
-        ocp_details = k8s_service.get_ocp_details()
+        ocp_details = await _run_in_thread(k8s_service.get_ocp_details)
         return ocp_details
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -478,7 +489,7 @@ async def get_cluster_operators(
     
     try:
         k8s_service = KubernetesService(cluster.kubeconfig_path)
-        operators = k8s_service.get_operators()
+        operators = await _run_in_thread(k8s_service.get_operators)
         return {"operators": operators, "total": len(operators)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -502,7 +513,7 @@ async def get_cluster_workloads(
     
     try:
         k8s_service = KubernetesService(cluster.kubeconfig_path)
-        workloads = k8s_service.get_workloads(namespace)
+        workloads = await _run_in_thread(k8s_service.get_workloads, namespace)
         return workloads
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

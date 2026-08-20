@@ -15,9 +15,8 @@ set_log_level_from_env()
 logger = create_logger("Main")
 
 CLUSTER_REFRESH_INTERVAL = 600  # 10 minutes in seconds
-CLUSTER_REFRESH_TIMEOUT = 120   # per-cluster timeout in seconds
-
-_refresh_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="cluster-refresh")
+CLUSTER_REFRESH_STALL = 120     # cancel if no K8s I/O succeeds for this many seconds
+CLUSTER_REFRESH_CONCURRENCY = 3 # max clusters refreshing at the same time
 
 cluster_refresh_state = {
     "last_refresh": None,
@@ -75,18 +74,30 @@ def _next_aligned_refresh() -> datetime:
     return datetime.fromtimestamp(next_s, tz=timezone.utc)
 
 
-async def _refresh_one_cluster(cluster_id: str, cluster_name: str) -> bool:
-    """Refresh a single cluster. K8s calls run on the dedicated thread pool;
-    DB operations stay on the main event loop."""
+async def _refresh_one_cluster(
+    cluster_id: str, cluster_name: str, on_progress=None
+) -> bool:
+    """Refresh a single cluster with its own dedicated thread pool.
+    Each cluster gets 5 threads so its K8s calls never queue behind
+    another cluster's work."""
     from app.services.cluster_service import ClusterService
+    executor = ThreadPoolExecutor(
+        max_workers=5, thread_name_prefix=f"k8s-{cluster_name[:10]}"
+    )
     try:
         async with AsyncSessionLocal() as session:
             svc = ClusterService(session)
-            await svc.refresh_cluster_status(cluster_id, executor=_refresh_executor)
+            await svc.refresh_cluster_status(
+                cluster_id,
+                executor=executor,
+                on_progress=on_progress,
+            )
         return True
     except Exception as e:
         logger.warning(f"Auto-refresh failed for {cluster_name}: {e}")
         return False
+    finally:
+        executor.shutdown(wait=False)
 
 
 async def cluster_refresh_task():
@@ -116,28 +127,64 @@ async def cluster_refresh_task():
 
             cluster_refresh_state["total"] = len(cluster_ids)
 
-            async def _wrap(cid, cname):
-                try:
-                    await asyncio.wait_for(
-                        _refresh_one_cluster(cid, cname),
-                        timeout=CLUSTER_REFRESH_TIMEOUT,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(f"Cluster refresh timed out for {cname}")
-                except Exception as e:
-                    logger.warning(f"Cluster refresh error for {cname}: {e}")
-                cluster_refresh_state["completed"] += 1
+            sem = asyncio.Semaphore(CLUSTER_REFRESH_CONCURRENCY)
 
+            async def _wrap(cid, cname):
+                async with sem:
+                    loop = asyncio.get_event_loop()
+                    t0 = loop.time()
+                    last_progress = [t0]
+                    outcome = "ok"
+
+                    logger.info(f"Refresh starting [{cname}]")
+
+                    def mark_progress():
+                        last_progress[0] = loop.time()
+
+                    task = asyncio.create_task(
+                        _refresh_one_cluster(cid, cname, on_progress=mark_progress)
+                    )
+
+                    while not task.done():
+                        await asyncio.sleep(5)
+                        idle = loop.time() - last_progress[0]
+                        if idle > CLUSTER_REFRESH_STALL:
+                            task.cancel()
+                            outcome = "stalled"
+                            logger.warning(
+                                f"Cluster refresh stalled for {cname} "
+                                f"(no I/O for {int(idle)}s)"
+                            )
+                            break
+
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as e:
+                        outcome = "error"
+                        logger.warning(
+                            f"Cluster refresh error for {cname}: {e}"
+                        )
+
+                    wall = loop.time() - t0
+                    logger.info(
+                        f"Refresh total [{cname}] {wall:.1f}s ({outcome})"
+                    )
+                    cluster_refresh_state["completed"] += 1
+
+            cycle_start = asyncio.get_event_loop().time()
             await asyncio.gather(
                 *[_wrap(cid, cname) for cid, cname in cluster_ids]
             )
+            cycle_wall = asyncio.get_event_loop().time() - cycle_start
 
             cluster_refresh_state["last_refresh"] = (
                 datetime.now(timezone.utc)
             )
             logger.info(
-                "Cluster auto-refresh: completed "
-                f"{len(cluster_ids)} clusters"
+                f"Cluster auto-refresh: completed "
+                f"{len(cluster_ids)} clusters in {cycle_wall:.1f}s"
             )
         except Exception as e:
             logger.error(f"Cluster auto-refresh error: {e}")
@@ -174,7 +221,6 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
-    _refresh_executor.shutdown(wait=False)
     await engine.dispose()
     logger.info("Shutting down PSAP Control Center...")
 
