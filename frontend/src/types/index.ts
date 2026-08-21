@@ -429,3 +429,174 @@ export interface SnapshotPeriod {
   discount_pct?: number | null
   clusters: SnapshotCluster[]
 }
+
+// ─── Fournos Testing Tab ──────────────────────────────────────────────
+
+export interface FournosJobSummary {
+  name: string
+  project: string
+  preset: string
+  cluster: string
+  pipeline: string
+  owner: string
+  status: string
+  message: string
+  created_at: string | null
+  completed_at: string | null
+  duration_seconds: number | null
+  mlflow_url: string
+  trigger_type: string
+  triggered_by_schedule: string | null
+  source: 'live' | 'history'
+}
+
+export interface FournosJobListResponse {
+  jobs: FournosJobSummary[]
+  total: number
+  page: number
+  per_page: number
+}
+
+export interface PipelineStage {
+  name: string
+  displayName: string
+  status: string
+  startTime: string | null
+  completionTime: string | null
+  finally: boolean
+}
+
+export interface TaskProgress {
+  completed: number
+  failed: number
+  cancelled: number
+  incomplete: number
+  skipped: number
+  total: number
+}
+
+export interface FournosPod {
+  name: string
+  phase: string
+  container: string
+  ready: boolean
+  restarts: number
+  age_minutes: number
+}
+
+export interface CurrentStep {
+  name: string
+  displayName: string
+  startTime: string | null
+}
+
+export interface ForgeInfo {
+  project: string
+  args: string[]
+  config_overrides: Record<string, unknown>
+  pr_number: string
+  pr_title: string
+  pr_url: string
+}
+
+export interface FournosJobDetailResponse {
+  job: {
+    metadata: Record<string, unknown>
+    spec: Record<string, unknown>
+    status: Record<string, unknown>
+    source: 'live' | 'history'
+    duration_seconds: number | null
+    mlflow_url: string
+    ci_artifacts_url: string
+  }
+  pods: FournosPod[]
+  stages: PipelineStage[]
+  current_step: CurrentStep | null
+  forge_info: ForgeInfo
+  task_progress: TaskProgress | null
+}
+
+export interface FournosJobEvent {
+  id: string
+  phase: string
+  message: string
+  timestamp: string | null
+}
+
+export interface FournosSchedule {
+  name: string
+  namespace: string
+  schedule: string
+  suspend: boolean
+  project: string
+  cluster: string
+  pipeline: string
+  preset: string
+  owner: string
+  has_resolver: boolean
+  resolver_configmap: string
+  resolver_image: string
+  resolver_filename: string
+  created_at: string
+  last_schedule: string
+  active_count: number
+}
+
+export interface ScheduleRun {
+  name: string
+  status: string
+  preset: string
+  trigger_type: string
+  duration_seconds: number | null
+  mlflow_url: string
+  created_at: string
+}
+
+export interface ForgeProject {
+  name: string
+  cluster: string
+  presets: string[]
+  config_keys: string[]
+  has_cli: boolean
+}
+
+export interface GitHubPR {
+  number: number
+  title: string
+  author: string
+  head_sha: string
+  branch: string
+  draft: boolean
+}
+
+export interface SubmitJobRequest {
+  project: string
+  cluster: string
+  pipeline: string
+  preset: string
+  version: string
+  owner: string
+  exclusive: boolean
+  config_overrides: Record<string, string>
+  pull_sha: string
+}
+
+export interface SubmitJobResponse {
+  status: string
+  job_name: string
+  redirect: string
+}
+
+export interface CreateScheduleRequest {
+  name: string
+  project: string
+  cluster: string
+  pipeline: string
+  preset: string
+  cron_expr: string
+  image_source: string
+  owner: string
+  resolver_script: string
+  resolver_image: string
+  resolver_filename: string
+}

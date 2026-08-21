@@ -155,6 +155,7 @@ async def init_db():
     from app.models.node_history import NodeHistory  # noqa: F401
     from app.models.instance_type_rate import InstanceTypeRate  # noqa: F401
     from app.models.cost_snapshot import CostSnapshot  # noqa: F401
+    from app.models.fournos_job import FournosJob, FournosJobEvent  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

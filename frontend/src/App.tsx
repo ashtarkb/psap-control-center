@@ -7,6 +7,8 @@ import ClusterDetail from './pages/ClusterDetail'
 import Reservations from './pages/Reservations'
 import Calendar from './pages/Calendar'
 import Testing from './pages/Testing'
+import TestingJobDetail from './pages/TestingJobDetail'
+import ScheduleRuns from './pages/ScheduleRuns'
 import Results from './pages/Results'
 import Settings from './pages/Settings'
 import CostExplorer from './pages/CostExplorer'
@@ -54,6 +56,8 @@ function App() {
         <Route path="reservations" element={<Reservations />} />
         <Route path="calendar" element={<Calendar />} />
         <Route path="testing" element={<Testing />} />
+        <Route path="testing/jobs/:name" element={<TestingJobDetail />} />
+        <Route path="testing/schedules/:name/runs" element={<ScheduleRuns />} />
         <Route path="results" element={<Results />} />
         <Route path="cost-explorer" element={isAdmin() ? <CostExplorer /> : <Navigate to="/dashboard" replace />} />
         <Route path="settings" element={isAdmin() ? <Settings /> : <Navigate to="/dashboard" replace />} />

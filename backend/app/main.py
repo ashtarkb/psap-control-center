@@ -210,6 +210,14 @@ async def lifespan(app: FastAPI):
     refresh_task = asyncio.create_task(cluster_refresh_task())
     logger.info("Cluster auto-refresh task started (every 10 min)")
 
+    # Start fournos job watcher (best-effort)
+    try:
+        from app.services.fournos_watcher import start_watcher as start_fournos_watcher
+        start_fournos_watcher()
+        logger.info("Fournos job watcher started")
+    except Exception as e:
+        logger.warning(f"Fournos watcher failed to start: {e}")
+
     # Bootstrap cost snapshots from stored data (non-blocking)
     async def _init_snapshots():
         try:

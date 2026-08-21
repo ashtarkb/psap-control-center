@@ -400,4 +400,104 @@ export const costExplorerApi = {
   },
 }
 
+export const fournosApi = {
+  listJobs: async (params: {
+    tab?: string
+    project?: string
+    cluster?: string
+    status?: string
+    owner?: string
+    page?: number
+    per_page?: number
+  } = {}) => {
+    const { data } = await api.get('/fournos/jobs', { params })
+    return data
+  },
+
+  getJob: async (name: string) => {
+    const { data } = await api.get(`/fournos/jobs/${name}`)
+    return data
+  },
+
+  getJobEvents: async (name: string) => {
+    const { data } = await api.get(`/fournos/jobs/${name}/events`)
+    return data
+  },
+
+  cancelJob: async (name: string) => {
+    const { data } = await api.post(`/fournos/jobs/${name}/cancel`)
+    return data
+  },
+
+  rerunJob: async (name: string) => {
+    const { data } = await api.post(`/fournos/jobs/${name}/rerun`)
+    return data
+  },
+
+  deleteHistoryJob: async (name: string) => {
+    const { data } = await api.delete(`/fournos/history/${name}`)
+    return data
+  },
+
+  submitJob: async (req: import('../types').SubmitJobRequest) => {
+    const { data } = await api.post('/fournos/submit', req)
+    return data
+  },
+
+  listProjects: async () => {
+    const { data } = await api.get('/fournos/projects')
+    return data
+  },
+
+  getProjectInfo: async (name: string) => {
+    const { data } = await api.get(`/fournos/projects/${name}`)
+    return data
+  },
+
+  listPipelines: async () => {
+    const { data } = await api.get('/fournos/pipelines')
+    return data
+  },
+
+  listSchedules: async () => {
+    const { data } = await api.get('/fournos/schedules')
+    return data
+  },
+
+  createSchedule: async (req: import('../types').CreateScheduleRequest) => {
+    const { data } = await api.post('/fournos/schedules', req)
+    return data
+  },
+
+  getScheduleRuns: async (name: string) => {
+    const { data } = await api.get(`/fournos/schedules/${name}/runs`)
+    return data
+  },
+
+  toggleSchedule: async (name: string) => {
+    const { data } = await api.post(`/fournos/schedules/${name}/toggle`)
+    return data
+  },
+
+  triggerSchedule: async (name: string) => {
+    const { data } = await api.post(`/fournos/schedules/${name}/trigger`)
+    return data
+  },
+
+  deleteSchedule: async (name: string) => {
+    const { data } = await api.delete(`/fournos/schedules/${name}`)
+    return data
+  },
+
+  getResolverScript: async (name: string) => {
+    const { data } = await api.get(`/fournos/schedules/${name}/resolver`)
+    return data
+  },
+
+  getGithubPRs: async () => {
+    const { data } = await api.get('/fournos/github/open-prs')
+    return data
+  },
+}
+
 export default api

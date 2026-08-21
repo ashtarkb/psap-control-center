@@ -1,4 +1,5 @@
 import httpx
+from typing import Optional
 from urllib.parse import urlparse
 
 from app.core.database import AsyncSessionLocal
@@ -12,7 +13,7 @@ SLACK_WEBHOOK_KEY = "slack_webhook_url"
 _ALLOWED_WEBHOOK_HOSTS = {"hooks.slack.com", "hooks.slack-gov.com"}
 
 
-def validate_webhook_url(url: str) -> str | None:
+def validate_webhook_url(url: str) -> Optional[str]:
     """Return an error string if the URL is not a valid Slack webhook, else None."""
     try:
         parsed = urlparse(url)

@@ -74,8 +74,15 @@ class HearthService:
         return path if os.path.isfile(path) else None
 
     def reset(self) -> None:
-        """Drop the cached K8s client so the next call rebuilds it."""
+        """Drop the cached K8s client so the next call rebuilds it.
+        Also resets the Fournos K8s client since it shares the same kubeconfig.
+        """
         self._custom_api = None
+        try:
+            from app.services.fournos_k8s_client import reset as reset_fournos
+            reset_fournos()
+        except Exception:
+            pass
 
     def save_kubeconfig(self, content: str) -> str:
         """Save a management-cluster kubeconfig and reconnect."""

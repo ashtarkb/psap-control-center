@@ -30,6 +30,24 @@ class Settings(BaseSettings):
 
     BILLING_CSV_STORAGE_PATH: str = "./billing_csvs"
 
+    # Fournos Testing Tab
+    FOURNOS_NAMESPACE: str = "fournos-jobs"
+    FOURNOS_API_GROUP: str = "fournos.dev"
+    FOURNOS_API_VERSION: str = "v1"
+    FOURNOS_JOB_PLURAL: str = "fournosjobs"
+    FOURNOS_K8S_TIMEOUT: int = 30
+
+    # Tekton CRD settings
+    TEKTON_API_GROUP: str = "tekton.dev"
+    TEKTON_API_VERSION: str = "v1"
+
+    # Forge project discovery
+    FORGE_REPO_PATH: Optional[str] = None
+    FORGE_PROJECTS_CONFIG_PATH: str = "/etc/fournos-dashboard/projects.yaml"
+    FORGE_GITHUB_REPO: str = "openshift-psap/forge"
+
+    FOURNOS_DEFAULT_PIPELINES: str = "forge-full,forge-prepare-test,forge-test-only,forge-prepare-only,forge-replot"
+
     class Config:
         env_file = ".env"
         case_sensitive = True
