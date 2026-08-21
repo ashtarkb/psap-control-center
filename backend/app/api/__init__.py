@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api import clusters, reservations, health, auth, hearth, settings, billing
+from app.api import clusters, reservations, health, auth, hearth, settings, billing, cost_explorer
 
 api_router = APIRouter()
 
@@ -11,3 +11,4 @@ api_router.include_router(reservations.router, prefix="/reservations", tags=["re
 api_router.include_router(hearth.router, prefix="/hearth", tags=["hearth"])
 api_router.include_router(settings.router, prefix="/settings", tags=["settings"])
 api_router.include_router(billing.router, prefix="/billing", tags=["billing"])
+api_router.include_router(cost_explorer.router, prefix="/cost-explorer", tags=["cost-explorer"])

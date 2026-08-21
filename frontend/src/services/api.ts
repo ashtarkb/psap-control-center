@@ -357,4 +357,47 @@ export const billingApi = {
   },
 }
 
+export const costExplorerApi = {
+  getYearSummary: async (year: number) => {
+    const { data } = await api.get(`/cost-explorer/year/${year}`)
+    return data
+  },
+
+  getClusterEstimate: async (clusterId: string, month?: string) => {
+    const { data } = await api.get(`/cost-explorer/clusters/${clusterId}/estimate`, {
+      params: month ? { month } : undefined,
+    })
+    return data
+  },
+
+  getWorkloads: async (clusterId: string, month?: string) => {
+    const { data } = await api.get(`/cost-explorer/clusters/${clusterId}/workloads`, {
+      params: month ? { month } : undefined,
+    })
+    return data
+  },
+
+  getRates: async () => {
+    const { data } = await api.get('/cost-explorer/rates')
+    return data
+  },
+
+  refreshRates: async () => {
+    const { data } = await api.post('/cost-explorer/rates/refresh')
+    return data
+  },
+
+  getSnapshots: async (start: string, end: string, granularity: string, clusterId?: string) => {
+    const { data } = await api.get('/cost-explorer/snapshots', {
+      params: { start, end, granularity, ...(clusterId ? { cluster_id: clusterId } : {}) },
+    })
+    return data
+  },
+
+  recomputeSnapshots: async () => {
+    const { data } = await api.post('/cost-explorer/snapshots/recompute')
+    return data
+  },
+}
+
 export default api

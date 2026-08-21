@@ -72,6 +72,7 @@ _MIGRATIONS = [
     ("reservations", "modification_requested_at", "TIMESTAMP"),
     ("clusters", "provider", "VARCHAR(20) NOT NULL DEFAULT 'ibm'"),
     ("clusters", "infra_id", "VARCHAR(100)"),
+    ("instance_type_rates", "is_estimated", "BOOLEAN NOT NULL DEFAULT FALSE"),
 ]
 
 
@@ -151,6 +152,9 @@ async def init_db():
     from app.models.gpu_pod_history import GpuPodHistory  # noqa: F401
     from app.models.setting import Setting  # noqa: F401
     from app.models.cluster_cost import ClusterCost  # noqa: F401
+    from app.models.node_history import NodeHistory  # noqa: F401
+    from app.models.instance_type_rate import InstanceTypeRate  # noqa: F401
+    from app.models.cost_snapshot import CostSnapshot  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

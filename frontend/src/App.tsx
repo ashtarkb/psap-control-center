@@ -9,6 +9,7 @@ import Calendar from './pages/Calendar'
 import Testing from './pages/Testing'
 import Results from './pages/Results'
 import Settings from './pages/Settings'
+import CostExplorer from './pages/CostExplorer'
 import { isAdmin, setSession } from './stores/authStore'
 import { authApi } from './services/api'
 
@@ -54,6 +55,7 @@ function App() {
         <Route path="calendar" element={<Calendar />} />
         <Route path="testing" element={<Testing />} />
         <Route path="results" element={<Results />} />
+        <Route path="cost-explorer" element={isAdmin() ? <CostExplorer /> : <Navigate to="/dashboard" replace />} />
         <Route path="settings" element={isAdmin() ? <Settings /> : <Navigate to="/dashboard" replace />} />
         <Route path="*" element={<NotFound />} />
       </Route>

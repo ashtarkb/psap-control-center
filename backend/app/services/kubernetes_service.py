@@ -171,6 +171,14 @@ class KubernetesService:
                     "cpu": node.status.capacity.get("cpu", "unknown"),
                     "memory": node.status.capacity.get("memory", "unknown"),
                     "gpu": node.status.capacity.get("nvidia.com/gpu", "0"),
+                    "instance_type": labels.get(
+                        "node.kubernetes.io/instance-type",
+                        labels.get("beta.kubernetes.io/instance-type", "unknown"),
+                    ),
+                    "region": labels.get(
+                        "topology.kubernetes.io/region",
+                        labels.get("failure-domain.beta.kubernetes.io/region", "unknown"),
+                    ),
                 }
                 node_details.append(node_info)
                 gpu_count += node_gpu

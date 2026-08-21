@@ -330,3 +330,102 @@ export interface HearthConnectResponse {
   success: boolean
   message: string
 }
+
+// Cost Explorer types
+
+export interface InstanceTypeRate {
+  instance_type: string
+  region: string
+  public_hourly_rate: number
+  plan_id?: string
+  is_estimated?: boolean
+  last_fetched: string
+}
+
+export interface NodeEstimate {
+  node_name: string
+  instance_type?: string
+  region?: string
+  is_gpu: boolean
+  hours_active: number
+  public_rate?: number
+  public_cost: number
+  estimated_cost: number
+  actual_cost?: number | null
+  rate_available: boolean
+}
+
+export interface ClusterEstimate {
+  cluster_id: string
+  billing_month: string
+  total_public_cost: number
+  total_estimated_cost: number
+  total_actual_cost?: number | null
+  discount_pct: number
+  node_count: number
+  nodes: NodeEstimate[]
+}
+
+export interface WorkloadAttribution {
+  namespace: string
+  gpu_hours: number
+  percentage: number
+  estimated_cost: number
+}
+
+export interface ClusterMonthlyCost {
+  cluster_id: string
+  cluster_name: string
+  cluster_color: string
+  actual_cost?: number | null
+  public_cost: number
+  estimated_cost?: number | null
+}
+
+export interface MonthlyCostSummary {
+  month: string
+  actual_total?: number | null
+  public_total: number
+  estimated_total?: number | null
+  savings?: number | null
+  discount_pct?: number | null
+  aggregate_discount_pct?: number | null
+  is_estimate: boolean
+  clusters: ClusterMonthlyCost[]
+}
+
+export interface YearSummary {
+  year: number
+  months: MonthlyCostSummary[]
+  ytd_actual: number
+  ytd_public: number
+  ytd_estimated: number
+  ytd_savings?: number | null
+  ytd_discount_pct?: number | null
+  aggregate_discount_pct?: number | null
+  cluster_count: number
+}
+
+export interface RateRefreshResponse {
+  updated: number
+  total: number
+}
+
+export interface SnapshotCluster {
+  cluster_id: string
+  cluster_name: string
+  cluster_color: string
+  public_cost: number
+  estimated_cost: number
+  actual_cost?: number | null
+}
+
+export interface SnapshotPeriod {
+  period: string
+  public_total: number
+  estimated_total: number
+  actual_total?: number | null
+  savings?: number | null
+  discount_pct?: number | null
+  clusters: SnapshotCluster[]
+}

@@ -210,6 +210,17 @@ async def lifespan(app: FastAPI):
     refresh_task = asyncio.create_task(cluster_refresh_task())
     logger.info("Cluster auto-refresh task started (every 10 min)")
 
+    # Bootstrap cost snapshots from stored data (non-blocking)
+    async def _init_snapshots():
+        try:
+            from app.services import cost_snapshot_service
+            async with AsyncSessionLocal() as session:
+                await cost_snapshot_service.initialize_snapshots(session)
+        except Exception as e:
+            logger.warning(f"Snapshot initialization failed: {e}")
+
+    asyncio.create_task(_init_snapshots())
+
     yield
 
     # Cleanup

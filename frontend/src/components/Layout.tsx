@@ -9,6 +9,7 @@ import {
   ClipboardDocumentListIcon,
   BeakerIcon,
   ChartBarIcon,
+  CurrencyDollarIcon,
   Cog6ToothIcon,
   LockClosedIcon,
   LockOpenIcon,
@@ -29,6 +30,7 @@ const navigation = [
   { name: 'Calendar', href: '/calendar', icon: CalendarDaysIcon },
   { name: 'Testing', href: '/testing', icon: BeakerIcon, comingSoon: true },
   { name: 'Results', href: '/results', icon: ChartBarIcon, comingSoon: true },
+  { name: 'Cost Explorer', href: '/cost-explorer', icon: CurrencyDollarIcon, adminOnly: true },
   { name: 'Settings', href: '/settings', icon: Cog6ToothIcon, adminOnly: true },
 ]
 

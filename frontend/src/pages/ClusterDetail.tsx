@@ -35,6 +35,8 @@ import { useCurrentClusterUser } from '../hooks/useReservations'
 import { useHearthCluster } from '../hooks/useHearth'
 import { useGpuStatus } from '../hooks/useGpuStatus'
 import { useClusterCosts, useRefreshClusterCost } from '../hooks/useClusterCost'
+import { useClusterEstimate } from '../hooks/useCostExplorer'
+import { isAdmin } from '../stores/authStore'
 import { format } from 'date-fns'
 import clsx from 'clsx'
 import type { TopologyNode, PodInfo } from '../types'
@@ -502,6 +504,7 @@ export default function ClusterDetail() {
   const { data: workloads, isLoading: workloadsLoading } = useClusterWorkloads(id!)
   const { data: costs, isLoading: costsLoading } = useClusterCosts(id!)
   const refreshCost = useRefreshClusterCost()
+  const { data: clusterEstimate } = useClusterEstimate(isAdmin() ? id : undefined)
 
   const refreshStatus = useRefreshClusterStatus()
   const uploadKubeconfig = useUploadKubeconfig()
@@ -852,6 +855,44 @@ export default function ClusterDetail() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Current Month Estimate (admin only) */}
+      {isAdmin() && clusterEstimate && clusterEstimate.node_count > 0 && (
+        <div className="card p-6">
+          <h3 className="font-semibold text-gray-900 flex items-center gap-2 mb-3">
+            <CurrencyDollarIcon className="h-5 w-5 text-blue-600" />
+            Current Month Estimate
+            {clusterEstimate.discount_pct > 0 && (
+              <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-medium">
+                {clusterEstimate.discount_pct}% discount
+              </span>
+            )}
+          </h3>
+          <div className="grid grid-cols-3 gap-3 mb-3">
+            <div className="text-center p-3 bg-gray-50 rounded-lg">
+              <p className="text-xs text-gray-500">Public Rate</p>
+              <p className="text-lg font-bold text-gray-700">
+                {clusterEstimate.total_public_cost.toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
+              </p>
+            </div>
+            <div className="text-center p-3 bg-blue-50 rounded-lg">
+              <p className="text-xs text-gray-500">Estimated Actual</p>
+              <p className="text-lg font-bold text-blue-700">
+                {clusterEstimate.total_estimated_cost.toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
+              </p>
+            </div>
+            <div className="text-center p-3 bg-green-50 rounded-lg">
+              <p className="text-xs text-gray-500">Est. Savings</p>
+              <p className="text-lg font-bold text-green-700">
+                {(clusterEstimate.total_public_cost - clusterEstimate.total_estimated_cost).toLocaleString(undefined, { style: 'currency', currency: 'USD' })}
+              </p>
+            </div>
+          </div>
+          <p className="text-xs text-gray-400">
+            Based on {clusterEstimate.node_count} nodes tracked this month ({clusterEstimate.billing_month})
+          </p>
         </div>
       )}
 

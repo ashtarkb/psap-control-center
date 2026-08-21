@@ -60,6 +60,10 @@ async def _refresh_all_cluster_costs():
                 cost_refresh_state["last_cluster"] = cluster.name
 
         logger.info(f"Batch cost refresh completed: {cost_refresh_state['completed']}/{cost_refresh_state['total']}")
+
+        from app.services import cost_snapshot_service
+        await cost_snapshot_service.recompute_all(session)
+        logger.info("Snapshots recomputed after billing refresh")
     except Exception as e:
         logger.error(f"Batch cost refresh error: {e}")
     finally:

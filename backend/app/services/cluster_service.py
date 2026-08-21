@@ -8,6 +8,7 @@ import os
 
 from app.models.cluster import Cluster, CLUSTER_COLORS
 from app.models.cluster_cost import ClusterCost
+from app.models.node_history import NodeHistory
 from app.schemas.cluster import ClusterCreate, ClusterUpdate, ClusterStatus
 from app.services.kubernetes_service import KubernetesService
 from app.services import billing_csv_service
@@ -282,6 +283,18 @@ class ClusterService:
             await self.db.commit()
             await self.db.refresh(cluster)
 
+            await self._upsert_node_history(
+                cluster_id, cluster_info.get("nodes", [])
+            )
+
+            try:
+                from app.services import cost_snapshot_service
+                await cost_snapshot_service.update_current_day(
+                    cluster_id, self.db
+                )
+            except Exception as e:
+                logger.warning(f"Snapshot update failed: {e}")
+
             namespaces = by_name["ns"] if not isinstance(by_name["ns"], Exception) else []
             resource_usage = by_name["usage"] if not isinstance(by_name["usage"], Exception) else {}
 
@@ -308,6 +321,54 @@ class ClusterService:
                 status="error",
                 last_health_check=cluster.last_health_check
             )
+
+    async def _upsert_node_history(
+        self, cluster_id: str, nodes: list
+    ) -> None:
+        """Track node uptime: create on first sight, update last_seen on every refresh."""
+        if not nodes:
+            return
+        now = datetime.utcnow()
+        result = await self.db.execute(
+            select(NodeHistory).where(NodeHistory.cluster_id == cluster_id)
+        )
+        existing = {nh.node_name: nh for nh in result.scalars().all()}
+
+        for node in nodes:
+            name = node.get("name", "")
+            if not name:
+                continue
+            instance_type = node.get("instance_type", "unknown")
+            region = node.get("region", "unknown")
+            gpu_count = node.get("gpu", 0)
+            try:
+                gpu_count = int(gpu_count)
+            except (TypeError, ValueError):
+                gpu_count = 0
+
+            if name in existing:
+                nh = existing[name]
+                nh.last_seen = now
+                nh.instance_type = instance_type
+                nh.region = region
+                nh.is_gpu_node = gpu_count > 0
+            else:
+                nh = NodeHistory(
+                    cluster_id=cluster_id,
+                    node_name=name,
+                    instance_type=instance_type,
+                    region=region,
+                    is_gpu_node=gpu_count > 0,
+                    first_seen=now,
+                    last_seen=now,
+                )
+                self.db.add(nh)
+
+        try:
+            await self.db.commit()
+        except Exception as e:
+            logger.warning(f"NodeHistory upsert failed: {e}")
+            await self.db.rollback()
 
     async def get_cluster_status(self, cluster_id: str) -> Optional[ClusterStatus]:
         cluster = await self.get_cluster(cluster_id)
