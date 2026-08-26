@@ -115,6 +115,8 @@ function HearthIndicator({
   )
 }
 
+const envBanner = import.meta.env.VITE_ENV_BANNER as string | undefined
+
 export default function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
@@ -145,6 +147,11 @@ export default function Layout() {
 
   return (
     <div className="min-h-screen bg-[#f0f0f0]">
+      {envBanner && (
+        <div className="fixed top-0 inset-x-0 z-[60] bg-amber-500 text-black text-center text-xs font-bold tracking-widest uppercase py-1 select-none">
+          {envBanner}
+        </div>
+      )}
       <Transition.Root show={sidebarOpen} as={Fragment}>
         <Dialog as="div" className="relative z-50 lg:hidden" onClose={setSidebarOpen}>
           <Transition.Child
@@ -219,7 +226,7 @@ export default function Layout() {
         </Dialog>
       </Transition.Root>
 
-      <div className="hidden lg:fixed lg:inset-y-0 lg:z-50 lg:flex lg:w-72 lg:flex-col">
+      <div className={clsx('hidden lg:fixed lg:inset-y-0 lg:z-50 lg:flex lg:w-72 lg:flex-col', envBanner && 'lg:top-7')}>
         <div className="flex grow flex-col gap-y-5 overflow-y-auto bg-[#212427] px-0 pb-4">
           <div className="flex h-16 shrink-0 items-center px-6">
             <div className="flex items-center gap-3">
@@ -282,7 +289,7 @@ export default function Layout() {
       </div>
 
       <div className="lg:pl-72">
-        <div className="sticky top-0 z-40 flex h-16 shrink-0 items-center gap-x-4 border-b border-white/10 bg-[#151515] px-4 sm:gap-x-6 sm:px-6 lg:px-8">
+        <div className={clsx('sticky z-40 flex h-16 shrink-0 items-center gap-x-4 border-b border-white/10 bg-[#151515] px-4 sm:gap-x-6 sm:px-6 lg:px-8', envBanner ? 'top-7' : 'top-0')}>
           <button
             type="button"
             className="-m-2.5 p-2.5 text-gray-300 lg:hidden"
