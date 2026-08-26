@@ -487,6 +487,7 @@ class KubernetesService:
         gpu_config = self._load_gpu_config_from_configmap()
         gpu_resource = gpu_config.get("gpu_resource_name", "nvidia.com/gpu")
         gpu_pods: List[GpuPodInfo] = []
+        dra_managed_nodes = set(node_gpus.keys())
         try:
             pods = self.core_v1.list_pod_for_all_namespaces(
                 _request_timeout=K8S_API_TIMEOUT
@@ -494,8 +495,6 @@ class KubernetesService:
             for pod in pods.items:
                 if pod.status.phase not in ("Running", "Pending"):
                     continue
-                # Skip pods that use DRA ResourceClaims to avoid
-                # double-counting GPUs already tallied above
                 pod_claims = getattr(
                     pod.spec, "resource_claims", None
                 )
@@ -511,7 +510,10 @@ class KubernetesService:
                     gpu_req = int(reqs.get(gpu_resource, 0))
                     if gpu_req > 0:
                         pod_total_gpu += gpu_req
-                        if pod_node and pod_node in node_gpus:
+                        # Only increment allocation for nodes NOT already
+                        # tracked by DRA ResourceClaims
+                        if (pod_node and pod_node in node_gpus
+                                and pod_node not in dra_managed_nodes):
                             node_gpus[pod_node].gpu_allocated += gpu_req
                 if pod_total_gpu > 0:
                     gpu_pods.append(GpuPodInfo(
