@@ -60,4 +60,3 @@ jobs:
           push: true
           tags: ${{ env.FRONTEND_IMAGE }}
           platforms: linux/amd64
-# Dev CI/CD pipeline active
