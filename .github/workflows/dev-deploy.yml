@@ -3,6 +3,7 @@ name: Dev Build & Push
 on:
   push:
     branches: [development]
+  workflow_dispatch:
 
 env:
   BACKEND_IMAGE: quay.io/redhat-performance/psap-control-center-backend:dev
