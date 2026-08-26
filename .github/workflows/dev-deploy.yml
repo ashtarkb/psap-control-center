@@ -30,8 +30,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: quay.io
-          username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_PASSWORD }}
+          username: ${{ secrets.QUAY_CONTROL_CENTER_USERNAME }}
+          password: ${{ secrets.QUAY_CONTROL_CENTER_PASSWORD }}
 
       - name: Build & push backend image
         uses: docker/build-push-action@v6
