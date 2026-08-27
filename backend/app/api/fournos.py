@@ -33,9 +33,13 @@ from app.schemas.fournos import (
     ScheduleResponse,
     SubmitJobRequest,
     SubmitJobResponse,
+    SubmitMatrixRequest,
+    SubmitMatrixResponse,
 )
+from app.schemas.ui_schema import ProjectUiSchemaResponse
 from app.services import fournos_db_service as db_svc
 from app.services import fournos_k8s_client as k8s
+from app.services import project_ui_schema
 from app.services.forge_discovery import discover_projects, get_project
 
 logger = logging.getLogger(__name__)
@@ -305,6 +309,9 @@ async def get_job(job_name: str):
                 "ready": p["ready"],
                 "restarts": p["restarts"],
                 "age_minutes": p["age_minutes"],
+                "exit_code": p.get("exit_code"),
+                "term_reason": p.get("term_reason", ""),
+                "term_message": p.get("term_message", ""),
             }
             for p in pods_raw
         ]
@@ -498,12 +505,45 @@ async def submit_job(req: SubmitJobRequest, _=Depends(require_auth)):
         )
         config_overrides[version_key] = req.version
 
-    args = [req.preset] if req.preset else []
-    job_name = k8s.sanitize_job_name("forge-{}".format(req.project))
+    display_name = "{} {}".format(req.project, req.preset).strip()
+    secret_refs: List[str] = []
+
+    if req.args:
+        # Generic multi-arg submission from a schema-driven form (see
+        # app/schemas/ui_schema.py) — one or more preset keys, in field order.
+        args = req.args
+        display_name = "{} {}".format(req.project, " ".join(args)).strip()
+        job_name = k8s.sanitize_job_name("forge-{}".format(req.project))
+    else:
+        args = [req.preset] if req.preset else []
+        job_name = k8s.sanitize_job_name("forge-{}".format(req.project))
 
     env = {}
     if req.pull_sha.strip():
         env["PULL_PULL_SHA"] = req.pull_sha.strip()
+
+    spec: dict[str, Any] = {
+        "cluster": req.cluster,
+        "displayName": display_name,
+        "owner": req.owner or "fournos-dashboard",
+        "pipeline": req.pipeline,
+        "exclusive": req.exclusive,
+        "priority": req.priority,
+        "executionEngine": {
+            "forge": {
+                "project": req.project,
+                "args": args,
+                "configOverrides": config_overrides,
+            }
+        },
+    }
+    if req.gpu_type.strip():
+        spec["hardware"] = {
+            "gpuType": req.gpu_type.strip(),
+            "gpuCount": req.gpu_count or 1,
+        }
+    if secret_refs:
+        spec["secretRefs"] = secret_refs
 
     body: dict[str, Any] = {
         "apiVersion": "{}/{}".format(
@@ -514,20 +554,7 @@ async def submit_job(req: SubmitJobRequest, _=Depends(require_auth)):
             "name": job_name,
             "namespace": settings.FOURNOS_NAMESPACE,
         },
-        "spec": {
-            "cluster": req.cluster,
-            "displayName": "{} {}".format(req.project, req.preset).strip(),
-            "owner": req.owner or "fournos-dashboard",
-            "pipeline": req.pipeline,
-            "exclusive": req.exclusive,
-            "executionEngine": {
-                "forge": {
-                    "project": req.project,
-                    "args": args,
-                    "configOverrides": config_overrides,
-                }
-            },
-        },
+        "spec": spec,
     }
     if env:
         body["spec"]["env"] = env
@@ -545,7 +572,7 @@ async def submit_job(req: SubmitJobRequest, _=Depends(require_auth)):
                 session,
                 name=created_name,
                 project=req.project,
-                preset=req.preset,
+                preset=req.preset or " ".join(req.args),
                 cluster=req.cluster,
                 pipeline=req.pipeline,
                 owner=req.owner or "fournos-dashboard",
@@ -565,6 +592,107 @@ async def submit_job(req: SubmitJobRequest, _=Depends(require_auth)):
         "job_name": created_name,
         "redirect": "/testing/jobs/{}".format(created_name),
     }
+
+
+# ─── routes: matrix (pipeline/CPT-style) submission ─────────────────────
+#
+# Generic across every project that declares a `kind: matrix` mode in its
+# ui/submit.yaml (see app/schemas/ui_schema.py) — no project-specific code.
+
+@router.post("/submit-matrix", response_model=SubmitMatrixResponse)
+async def submit_matrix(req: SubmitMatrixRequest, _=Depends(require_auth)):
+    """Submit a matrix pipeline — creates one FournosJob per model, each
+    carrying all of the selected workloads plus the shared args/overrides.
+    """
+    if not req.models or not req.workloads:
+        raise HTTPException(400, "models and workloads are required")
+
+    results = []
+    for model_item in req.models:
+        args = list(req.args) + [model_item.key] + list(req.workloads)
+
+        job_overrides: dict[str, Any] = dict(req.config_overrides)
+        job_overrides.update({k: v for k, v in model_item.overrides.items()})
+
+        display_name = "{}-{}-{}".format(req.project, model_item.key, req.cluster)
+        generate_name = re.sub(
+            r"[^a-z0-9-]", "-", "{}-{}-".format(req.project, model_item.key).lower()
+        )
+
+        env: dict[str, str] = {}
+        if req.pull_sha.strip():
+            env["PULL_PULL_SHA"] = req.pull_sha.strip()
+
+        spec: dict[str, Any] = {
+            "cluster": req.cluster,
+            "displayName": display_name,
+            "owner": req.owner,
+            "pipeline": req.pipeline,
+            "exclusive": req.exclusive,
+            "priority": req.priority,
+            "executionEngine": {
+                "forge": {
+                    "project": req.project,
+                    "args": args,
+                    "configOverrides": job_overrides,
+                }
+            },
+        }
+        if req.gpu_type.strip() or model_item.gpu_count:
+            spec["hardware"] = {
+                "gpuType": req.gpu_type.strip() or "unknown",
+                "gpuCount": model_item.gpu_count or 1,
+            }
+
+        body: dict[str, Any] = {
+            "apiVersion": "{}/{}".format(
+                settings.FOURNOS_API_GROUP, settings.FOURNOS_API_VERSION
+            ),
+            "kind": "FournosJob",
+            "metadata": {
+                "generateName": generate_name,
+                "namespace": settings.FOURNOS_NAMESPACE,
+            },
+            "spec": spec,
+        }
+        if env:
+            body["spec"]["env"] = env
+
+        try:
+            created = await asyncio.to_thread(k8s.create_fournos_job, body)
+            created_name = created.get("metadata", {}).get("name", generate_name)
+            results.append({
+                "model": model_item.key,
+                "job_name": created_name,
+                "status": "created",
+            })
+
+            try:
+                async with AsyncSessionLocal() as session, session.begin():
+                    await db_svc.upsert_job(
+                        session,
+                        name=created_name,
+                        project=req.project,
+                        preset="{} {}".format(model_item.key, " ".join(req.workloads)),
+                        cluster=req.cluster,
+                        pipeline=req.pipeline,
+                        owner=req.owner,
+                        status="Pending",
+                        config_overrides=job_overrides,
+                        fjob_spec=body.get("spec", {}),
+                    )
+            except Exception as exc:
+                logger.error(
+                    "DB upsert failed for matrix job %s: %s", created_name, exc
+                )
+        except Exception as exc:
+            results.append({
+                "model": model_item.key,
+                "status": "failed",
+                "error": str(exc),
+            })
+
+    return {"status": "ok", "jobs": results, "total": len(results)}
 
 
 # ─── routes: projects ───────────────────────────────────────────────────
@@ -596,6 +724,28 @@ async def project_info(project_name: str):
         "config_keys": proj.config_keys,
         "has_cli": proj.has_cli,
     }
+
+
+@router.get("/projects/{project_name}/ui-schema", response_model=ProjectUiSchemaResponse)
+async def project_ui_schema_api(project_name: str):
+    """Fetch a project's declarative submit-form schema
+    (``projects/<name>/ui/submit.yaml`` in the Forge repo), if it publishes one.
+
+    This is the generic, shared mechanism: any Forge project can add this
+    file to get a fully dynamic submit form without project-specific code
+    in the Control Center.
+    """
+    schema = await project_ui_schema.get_schema(project_name)
+    return ProjectUiSchemaResponse(
+        found=schema is not None, project=project_name, ui_schema=schema
+    )
+
+
+@router.post("/projects/{project_name}/ui-schema/refresh")
+async def project_ui_schema_refresh(project_name: str, _=Depends(require_auth)):
+    """Force-refresh the cached ui/submit.yaml for a project from GitHub."""
+    schema = await project_ui_schema.refresh_schema(project_name)
+    return {"status": "ok", "found": schema is not None}
 
 
 @router.get("/pipelines")

@@ -174,22 +174,51 @@ function PodsPanel({
     <div className="space-y-2">
       <h3 className="text-sm font-semibold text-gray-900">Pods ({pods.length})</h3>
       <div className="space-y-1">
-        {pods.map((pod) => (
-          <button
-            key={pod.name}
-            onClick={() => onSelectPod(pod.name)}
-            className={clsx(
-              'w-full text-left px-3 py-2 rounded-lg text-xs flex items-center justify-between',
-              selectedPod === pod.name ? 'bg-indigo-50 ring-1 ring-indigo-200' : 'hover:bg-gray-50'
-            )}
-          >
-            <div className="flex items-center gap-2 truncate">
-              <span className={clsx('w-2 h-2 rounded-full', pod.ready ? 'bg-green-500' : pod.phase === 'Running' ? 'bg-blue-500 animate-pulse' : 'bg-gray-300')} />
-              <span className="truncate font-mono">{pod.name}</span>
-            </div>
-            <span className="text-gray-400 ml-2">{pod.age_minutes}m</span>
-          </button>
-        ))}
+        {pods.map((pod) => {
+          const failed = pod.exit_code != null && pod.exit_code !== 0
+          return (
+            <button
+              key={pod.name}
+              onClick={() => onSelectPod(pod.name)}
+              className={clsx(
+                'w-full text-left px-3 py-2 rounded-lg text-xs',
+                selectedPod === pod.name ? 'bg-indigo-50 ring-1 ring-indigo-200' : 'hover:bg-gray-50'
+              )}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 truncate">
+                  <span className={clsx('w-2 h-2 rounded-full shrink-0', pod.ready ? 'bg-green-500' : pod.phase === 'Running' ? 'bg-blue-500 animate-pulse' : failed ? 'bg-red-500' : 'bg-gray-300')} />
+                  <span className="truncate font-mono">{pod.name}</span>
+                </div>
+                <span className="text-gray-400 ml-2 shrink-0">{pod.age_minutes}m</span>
+              </div>
+              {(pod.term_reason || pod.exit_code != null) && (
+                <div className="mt-1 flex items-center gap-1.5 flex-wrap pl-4">
+                  {pod.term_reason && (
+                    <span
+                      className={clsx(
+                        'px-1.5 py-0.5 rounded text-[10px] font-medium',
+                        pod.term_reason === 'Completed' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                      )}
+                    >
+                      {pod.term_reason}
+                    </span>
+                  )}
+                  {pod.exit_code != null && (
+                    <code className={clsx('text-[10px]', pod.exit_code !== 0 ? 'text-red-600' : 'text-gray-400')}>
+                      exit {pod.exit_code}
+                    </code>
+                  )}
+                </div>
+              )}
+              {pod.term_message && failed && (
+                <p className="mt-1 pl-4 text-[11px] text-red-600 truncate" title={pod.term_message}>
+                  {pod.term_message}
+                </p>
+              )}
+            </button>
+          )
+        })}
       </div>
     </div>
   )
@@ -260,7 +289,21 @@ export default function TestingJobDetail() {
   const cancelJob = useCancelJob()
   const rerunJob = useRerunJob()
   const [selectedPod, setSelectedPod] = useState('')
+  const [autoSelected, setAutoSelected] = useState(false)
   const [showSpec, setShowSpec] = useState(false)
+
+  const pods = data?.pods ?? []
+  const phase = (data?.job.status as Record<string, unknown> | undefined)?.phase as string | undefined
+
+  useEffect(() => {
+    if (autoSelected || selectedPod || !pods.length) return
+    if (phase !== 'Failed') return
+    const failedPod = pods.find((p) => p.exit_code != null && p.exit_code !== 0) || pods.find((p) => p.term_reason && p.term_reason !== 'Completed')
+    if (failedPod) {
+      setSelectedPod(failedPod.name)
+      setAutoSelected(true)
+    }
+  }, [pods, phase, autoSelected, selectedPod])
 
   if (isLoading) {
     return (
@@ -281,14 +324,14 @@ export default function TestingJobDetail() {
     )
   }
 
-  const { job, pods, stages, current_step, forge_info, task_progress } = data
+  const { job, stages, current_step, forge_info, task_progress } = data
   const meta = job.metadata as Record<string, unknown>
   const spec = job.spec as Record<string, unknown>
   const status = job.status as Record<string, unknown>
-  const phase = (status.phase as string) || 'Unknown'
+  const displayPhase = (status.phase as string) || 'Unknown'
   const message = (status.message as string) || ''
   const conditions = (status.conditions as Array<Record<string, string>>) || []
-  const isRunning = ['Running', 'Pending', 'Admitted', 'Resolving'].includes(phase)
+  const isRunning = ['Running', 'Pending', 'Admitted', 'Resolving'].includes(displayPhase)
 
   return (
     <div className="space-y-6">
@@ -302,8 +345,8 @@ export default function TestingJobDetail() {
           <div className="mt-1 flex items-center gap-3 text-sm text-gray-500">
             {forge_info.project && <span className="font-medium text-gray-700">{forge_info.project}</span>}
             {forge_info.args?.length > 0 && <span>{forge_info.args.join(' ')}</span>}
-            <span className={clsx('px-2 py-0.5 rounded-full text-xs font-medium', STATUS_BADGE[phase] || 'bg-gray-100 text-gray-600')}>
-              {phase}
+            <span className={clsx('px-2 py-0.5 rounded-full text-xs font-medium', STATUS_BADGE[displayPhase] || 'bg-gray-100 text-gray-600')}>
+              {displayPhase}
             </span>
             {job.source === 'history' && <span className="text-xs text-gray-400">(from history)</span>}
           </div>

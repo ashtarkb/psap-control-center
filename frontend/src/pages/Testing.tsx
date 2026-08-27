@@ -1,10 +1,11 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import {
   PlayIcon,
   ClockIcon,
   CalendarDaysIcon,
   PlusIcon,
+  ArrowLeftIcon,
   ArrowPathIcon,
   XMarkIcon,
   StopIcon,
@@ -13,6 +14,10 @@ import {
 import clsx from 'clsx'
 import { isAdmin, isAuthenticated } from '../stores/authStore'
 import { useClusters } from '../hooks/useClusters'
+import DynamicSubmitForm from '../components/DynamicSubmitForm'
+import ClusterCombobox from '../components/ClusterCombobox'
+import WizardSteps from '../components/WizardSteps'
+import ReviewRow, { ReviewSection } from '../components/ReviewRow'
 import {
   useFournosJobs,
   useFournosSchedules,
@@ -25,6 +30,7 @@ import {
   useTriggerSchedule,
   useDeleteSchedule,
   useGithubPRs,
+  useProjectUiSchema,
 } from '../hooks/useFournos'
 import type {
   FournosJobSummary,
@@ -160,29 +166,40 @@ function SubmitForm({ onSubmitted }: { onSubmitted?: (name: string) => void }) {
   const { data: projects } = useForgeProjects()
   const { data: pipelines } = usePipelines()
   const { data: githubPRs } = useGithubPRs()
-  const { data: clustersData } = useClusters()
   const submitJob = useSubmitJob()
-  const clusterNames = useMemo(
-    () => (clustersData?.clusters || []).map((c: Cluster) => c.name),
-    [clustersData]
-  )
 
+  // "Basics" — common to every project, owned here so there is exactly one
+  // wizard/step indicator (DynamicSubmitForm only renders steps 2 and 3,
+  // driven by the `step` state below, and never its own nested wizard).
   const [project, setProject] = useState('')
   const [cluster, setCluster] = useState('')
   const [pipeline, setPipeline] = useState('forge-test-only')
   const [preset, setPreset] = useState('')
   const [version, setVersion] = useState('')
   const [owner, setOwner] = useState('')
+  const [priority, setPriority] = useState('manual')
   const [exclusive, setExclusive] = useState(false)
   const [configRaw, setConfigRaw] = useState('')
   const [pullSha, setPullSha] = useState('')
   const [prSearch, setPrSearch] = useState('')
   const [prDropdownOpen, setPrDropdownOpen] = useState(false)
+  const [step, setStep] = useState(1)
 
   const selectedProject = useMemo(
     () => projects?.find((p: ForgeProject) => p.name === project),
     [projects, project]
   )
+
+  // Any project that publishes a projects/<name>/ui/submit.yaml in Forge
+  // gets a fully dynamic form for free — see docs/ui-schema-spec.md. This
+  // is the same mechanism for every project, RHAIIS included; there is no
+  // project-specific form or backend code path.
+  const { data: uiSchemaResp } = useProjectUiSchema(project || undefined)
+  const dynamicSchema = uiSchemaResp?.found ? uiSchemaResp.ui_schema : null
+
+  useEffect(() => {
+    setStep(1)
+  }, [project])
 
   const showVersion = VERSION_PROJECTS.includes(project)
 
@@ -235,6 +252,7 @@ function SubmitForm({ onSubmitted }: { onSubmitted?: (name: string) => void }) {
         preset,
         version,
         owner,
+        priority,
         exclusive,
         config_overrides: overrides,
         pull_sha: pullSha,
@@ -246,140 +264,233 @@ function SubmitForm({ onSubmitted }: { onSubmitted?: (name: string) => void }) {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6 max-w-2xl">
-      {submitJob.error && (
-        <div className="rounded-lg bg-red-50 p-4 text-sm text-red-700">
-          {submitJob.error.message}
+    <div className="space-y-6 max-w-2xl">
+      <WizardSteps steps={['Basics', 'Project Details', 'Review & Submit']} current={step} />
+
+      {step === 1 && (
+        <div className="rounded-lg border border-gray-200 p-4 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700">Project</label>
+            <select value={project} onChange={(e) => handleProjectChange(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" required>
+              <option value="">Select a project</option>
+              {(projects || []).map((p: ForgeProject) => <option key={p.name} value={p.name}>{p.name}</option>)}
+            </select>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Cluster</label>
+              <ClusterCombobox
+                value={cluster}
+                onChange={setCluster}
+                required
+                inputClassName="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Pipeline</label>
+              <select value={pipeline} onChange={(e) => setPipeline(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                {(pipelines || []).map((p: string) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Owner</label>
+              <input type="text" value={owner} onChange={(e) => setOwner(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" placeholder="your-name" />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Priority</label>
+              <select value={priority} onChange={(e) => setPriority(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                <option value="manual">manual</option>
+                <option value="low">low</option>
+                <option value="normal">normal</option>
+                <option value="high">high</option>
+              </select>
+            </div>
+
+            <div className="flex items-end">
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={exclusive} onChange={(e) => setExclusive(e.target.checked)} className="rounded border-gray-300 text-indigo-600" />
+                Exclusive (lock cluster for this job)
+              </label>
+            </div>
+          </div>
+
+          {/* Pull Request picker */}
+          <div className="relative">
+            <label className="block text-sm font-medium text-gray-700">Pull Request (optional)</label>
+            <input
+              type="text"
+              value={prSearch}
+              onChange={(e) => { setPrSearch(e.target.value); setPrDropdownOpen(true); setPullSha('') }}
+              onFocus={() => setPrDropdownOpen(true)}
+              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
+              placeholder="Search PRs by number, title, or author..."
+            />
+            {pullSha && (
+              <p className="mt-1 text-xs text-gray-500">
+                HEAD SHA: <code className="text-indigo-600 font-mono">{pullSha}</code>
+              </p>
+            )}
+            {!pullSha && (
+              <p className="mt-1 text-xs text-gray-400">
+                {githubPRs ? `${githubPRs.length} open PR(s) loaded from Forge repo.` : 'Loading PRs...'}
+                {' '}Forge will build from this commit instead of the default image.
+              </p>
+            )}
+            {prDropdownOpen && filteredPRs.length > 0 && (
+              <div className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto rounded-md bg-white shadow-lg border border-gray-200">
+                <button type="button" onClick={() => selectPR(null)} className="w-full text-left px-3 py-2 text-sm text-gray-500 hover:bg-gray-50 border-b border-gray-100">
+                  None (clear selection)
+                </button>
+                {filteredPRs.map((pr) => (
+                  <button
+                    key={pr.number}
+                    type="button"
+                    onClick={() => selectPR(pr)}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-indigo-50 border-b border-gray-50"
+                  >
+                    <span className="font-medium text-gray-900">#{pr.number}</span>
+                    <span className="text-gray-600 ml-1">{pr.title}</span>
+                    <span className="text-gray-400 ml-1">({pr.author})</span>
+                    {pr.draft && <span className="ml-1 text-xs text-yellow-600">[draft]</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="flex justify-end pt-2">
+            <button
+              type="button"
+              disabled={!project || !cluster}
+              onClick={() => setStep(2)}
+              className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
+            >
+              Next: Project Details
+            </button>
+          </div>
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div>
-          <label className="block text-sm font-medium text-gray-700">Project</label>
-          <select value={project} onChange={(e) => handleProjectChange(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" required>
-            <option value="">Select a project</option>
-            {(projects || []).map((p: ForgeProject) => <option key={p.name} value={p.name}>{p.name}</option>)}
-          </select>
-        </div>
+      {/* "Basics" review box must render before DynamicSubmitForm's own
+          review sections so the summary reads top-to-bottom in wizard
+          order — it's gated on step === 3 but placed here, ahead of the
+          always-mounted DynamicSubmitForm below. */}
+      {step === 3 && (
+        <ReviewSection title="Basics">
+          <ReviewRow label="Project" value={project} missing={!project} />
+          <ReviewRow label="Cluster" value={cluster} missing={!cluster} />
+          <ReviewRow label="Pipeline" value={pipeline} />
+          {owner && <ReviewRow label="Owner" value={owner} />}
+          <ReviewRow label="Priority" value={priority} />
+          {exclusive && <ReviewRow label="Exclusive" value="Yes" />}
+          {pullSha && <ReviewRow label="Pull Request" value={prSearch || pullSha} mono={!prSearch} />}
+        </ReviewSection>
+      )}
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700">Cluster</label>
-          <input
-            type="text"
-            list="cluster-suggestions"
-            value={cluster}
-            onChange={(e) => setCluster(e.target.value)}
-            className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-            placeholder="Cluster name"
-            required
-          />
-          {clusterNames.length > 0 && (
-            <datalist id="cluster-suggestions">
-              {clusterNames.map((name: string) => <option key={name} value={name} />)}
-            </datalist>
-          )}
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700">Pipeline</label>
-          <select value={pipeline} onChange={(e) => setPipeline(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
-            {(pipelines || []).map((p: string) => <option key={p} value={p}>{p}</option>)}
-          </select>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700">Preset</label>
-          {selectedProject?.presets?.length ? (
-            <select value={preset} onChange={(e) => setPreset(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
-              <option value="">None (default)</option>
-              {selectedProject.presets.map((p: string) => <option key={p} value={p}>{p}</option>)}
-            </select>
-          ) : (
-            <input type="text" value={preset} onChange={(e) => setPreset(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" placeholder="Optional preset" />
-          )}
-          {!selectedProject && project === '' && (
-            <p className="mt-1 text-xs text-gray-400">Select a project first to see available presets.</p>
-          )}
-        </div>
-
-        {showVersion && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700">MCP Gateway Version</label>
-            <input type="text" value={version} onChange={(e) => setVersion(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" placeholder="v1.2.3 or commit SHA" />
-            <p className="mt-1 text-xs text-gray-400">Semver tag or 40-char commit SHA for nightly builds.</p>
-          </div>
-        )}
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700">Owner</label>
-          <input type="text" value={owner} onChange={(e) => setOwner(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" placeholder="your-name" />
-        </div>
-
-        <div className="flex items-end">
-          <label className="flex items-center gap-2 text-sm text-gray-700">
-            <input type="checkbox" checked={exclusive} onChange={(e) => setExclusive(e.target.checked)} className="rounded border-gray-300 text-indigo-600" />
-            Exclusive (lock cluster for this job)
-          </label>
-        </div>
-      </div>
-
-      {/* Pull Request picker */}
-      <div className="relative">
-        <label className="block text-sm font-medium text-gray-700">Pull Request (optional)</label>
-        <input
-          type="text"
-          value={prSearch}
-          onChange={(e) => { setPrSearch(e.target.value); setPrDropdownOpen(true); setPullSha('') }}
-          onFocus={() => setPrDropdownOpen(true)}
-          className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-          placeholder="Search PRs by number, title, or author..."
+      {/* DynamicSubmitForm stays mounted across steps 2/3 so its internal
+          field state survives navigating back to review it — it renders
+          nothing itself while step === 1. */}
+      {dynamicSchema && (
+        <DynamicSubmitForm
+          project={project}
+          schema={dynamicSchema}
+          basics={{ cluster, pipeline, owner, priority, exclusive, pullSha, prLabel: prSearch || pullSha }}
+          step={step}
+          onBack={() => setStep(step - 1)}
+          onNext={() => setStep(step + 1)}
+          onSubmitted={onSubmitted}
         />
-        {pullSha && (
-          <p className="mt-1 text-xs text-gray-500">
-            HEAD SHA: <code className="text-indigo-600 font-mono">{pullSha}</code>
-          </p>
-        )}
-        {!pullSha && (
-          <p className="mt-1 text-xs text-gray-400">
-            {githubPRs ? `${githubPRs.length} open PR(s) loaded from Forge repo.` : 'Loading PRs...'}
-            {' '}Forge will build from this commit instead of the default image.
-          </p>
-        )}
-        {prDropdownOpen && filteredPRs.length > 0 && (
-          <div className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto rounded-md bg-white shadow-lg border border-gray-200">
-            <button type="button" onClick={() => selectPR(null)} className="w-full text-left px-3 py-2 text-sm text-gray-500 hover:bg-gray-50 border-b border-gray-100">
-              None (clear selection)
+      )}
+
+      {!dynamicSchema && step === 2 && (
+        <div className="space-y-6">
+          <ReviewSection title="Project Details">
+            <div className="p-4 grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
+              <div>
+                <label className="block text-sm font-medium text-gray-700">Preset</label>
+                {selectedProject?.presets?.length ? (
+                  <select value={preset} onChange={(e) => setPreset(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
+                    <option value="">None (default)</option>
+                    {selectedProject.presets.map((p: string) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                ) : (
+                  <input type="text" value={preset} onChange={(e) => setPreset(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" placeholder="Optional preset" />
+                )}
+              </div>
+
+              {showVersion && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">MCP Gateway Version</label>
+                  <input type="text" value={version} onChange={(e) => setVersion(e.target.value)} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm" placeholder="v1.2.3 or commit SHA" />
+                  <p className="mt-1 text-xs text-gray-400">Semver tag or 40-char commit SHA for nightly builds.</p>
+                </div>
+              )}
+
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium text-gray-700">Config Overrides</label>
+                <textarea value={configRaw} onChange={(e) => setConfigRaw(e.target.value)} rows={3} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm font-mono" placeholder="infrastructure.version: latest" />
+                <p className="mt-1 text-xs text-gray-400">Same as /var directives. One key: value per line.</p>
+              </div>
+            </div>
+          </ReviewSection>
+
+          <div className="flex justify-between">
+            <button
+              type="button"
+              onClick={() => setStep(1)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              <ArrowLeftIcon className="h-4 w-4" /> Back
             </button>
-            {filteredPRs.map((pr) => (
-              <button
-                key={pr.number}
-                type="button"
-                onClick={() => selectPR(pr)}
-                className="w-full text-left px-3 py-2 text-sm hover:bg-indigo-50 border-b border-gray-50"
-              >
-                <span className="font-medium text-gray-900">#{pr.number}</span>
-                <span className="text-gray-600 ml-1">{pr.title}</span>
-                <span className="text-gray-400 ml-1">({pr.author})</span>
-                {pr.draft && <span className="ml-1 text-xs text-yellow-600">[draft]</span>}
-              </button>
-            ))}
+            <button
+              type="button"
+              onClick={() => setStep(3)}
+              className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500"
+            >
+              Next: Review
+            </button>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      <div>
-        <label className="block text-sm font-medium text-gray-700">Config Overrides</label>
-        <textarea value={configRaw} onChange={(e) => setConfigRaw(e.target.value)} rows={3} className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm font-mono" placeholder="infrastructure.version: latest" />
-        <p className="mt-1 text-xs text-gray-400">Same as /var directives. One key: value per line.</p>
-      </div>
+      {!dynamicSchema && step === 3 && (
+        <div className="space-y-4">
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {submitJob.error && (
+              <div className="rounded-lg bg-red-50 p-4 text-sm text-red-700">
+                {submitJob.error.message}
+              </div>
+            )}
+            <ReviewSection title="Project Details">
+              {preset && <ReviewRow label="Preset" value={preset} />}
+              {showVersion && version && <ReviewRow label="MCP Gateway Version" value={version} />}
+              {configRaw.trim() && <ReviewRow label="Config Overrides" value={configRaw.trim()} mono />}
+              {!preset && !(showVersion && version) && !configRaw.trim() && (
+                <ReviewRow label="Overrides" value="None" />
+              )}
+            </ReviewSection>
 
-      <div className="flex gap-3">
-        <button type="submit" disabled={submitJob.isPending || !project || !cluster} className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50">
-          {submitJob.isPending ? <ArrowPathIcon className="h-4 w-4 animate-spin" /> : <PlayIcon className="h-4 w-4" />}
-          Submit Job
-        </button>
-      </div>
-    </form>
+            <div className="flex justify-between">
+              <button
+                type="button"
+                onClick={() => setStep(2)}
+                className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                <ArrowLeftIcon className="h-4 w-4" /> Back
+              </button>
+              <button type="submit" disabled={submitJob.isPending || !project || !cluster} className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50">
+                {submitJob.isPending ? <ArrowPathIcon className="h-4 w-4 animate-spin" /> : <PlayIcon className="h-4 w-4" />}
+                Submit Job
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -558,6 +669,12 @@ export default function Testing() {
       )}
 
       {/* Content */}
+      {activeTab === 'submit' ? (
+        <div className="rounded-xl bg-white shadow-sm border border-gray-200 p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4">Submit FournosJob</h2>
+          <SubmitForm onSubmitted={() => setTab('live')} />
+        </div>
+      ) : (
       <div className="card">
         {activeTab === 'live' && (
           isLoading ? (
@@ -601,15 +718,9 @@ export default function Testing() {
           )
         )}
 
-        {activeTab === 'submit' && (
-          <div className="p-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Submit FournosJob</h2>
-            <SubmitForm onSubmitted={() => setTab('live')} />
-          </div>
-        )}
-
         {activeTab === 'schedules' && <SchedulesTab />}
       </div>
+      )}
     </div>
   )
 }

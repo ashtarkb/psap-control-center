@@ -1,0 +1,20 @@
+schema_version: 1
+project: skeleton
+title: Skeleton
+description: >
+  The Forge project template — flat named presets, same shape as
+  mcp_gateway. New projects can copy this file as a starting point.
+
+modes:
+  - id: single
+    label: Submit Job
+    default: true
+    sections:
+      - id: run
+        label: Run
+        fields:
+          - key: preset
+            label: Preset
+            type: select
+            required: true
+            options_ref: {dir: presets.d, preset_pool: true}

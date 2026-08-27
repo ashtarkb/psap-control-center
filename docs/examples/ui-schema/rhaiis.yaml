@@ -1,0 +1,144 @@
+schema_version: 1
+project: rhaiis
+title: RHAIIS
+description: >
+  RHAIIS inference-server performance testing. Accelerator, engine, cluster,
+  model, workload, and benchmark are all named presets mixed together in
+  presets.d, self-tagged by which key each entry sets — hence the shared
+  `presets_ref` pool instead of per-field `options_ref` files.
+
+modes:
+  - id: single
+    label: Single Job
+    default: true
+    presets_ref:
+      dir: presets.d
+    sections:
+      - id: infra
+        label: Infrastructure
+        fields:
+          - key: accelerator
+            label: Accelerator
+            type: radio
+            required: true
+            maps_to: rhaiis.accelerator
+          - key: engine
+            label: Engine
+            type: select
+            required: true
+            maps_to: rhaiis.engine
+          - key: engine_version
+            label: Engine Version
+            type: text
+            placeholder: e.g. 0.8.0
+            maps_to: rhaiis.engine.version
+          # NOTE: RHAIIS's presets.d also has a `cluster_tag` preset
+          # (hera/zeus), but rhaiis.cluster_tag is purely a label used for
+          # grouping results in the dashboard/CSV export (see
+          # forge/projects/rhaiis/README.md) — it has no effect on where
+          # the job actually runs (that's the real "Cluster" field above,
+          # from the Control Center's own registered clusters). Excluded
+          # here on purpose to avoid the confusing double "cluster" prompt.
+
+      - id: model
+        label: Model & Workload
+        fields:
+          - key: model
+            label: Model
+            type: select
+            required: true
+            maps_to: tests.rhaiis.model_key
+            options_ref:
+              path: config.d/models.yaml
+              label_field: name
+              join_key: tests.rhaiis.model_key
+          - key: workload
+            label: Workload
+            type: multiselect
+            maps_to: tests.rhaiis.workload_key
+            options_ref:
+              path: config.d/workloads.yaml
+              join_key: tests.rhaiis.workload_key
+          - key: benchmark
+            label: Benchmark
+            type: select
+            maps_to: tests.rhaiis.run_benchmark
+
+      - id: run_settings
+        label: Run Settings
+        fields:
+          - key: version
+            label: RHAIIS Version
+            type: text
+            maps_to: tests.rhaiis.version
+            placeholder: main / PR SHA
+          - key: warmup
+            label: Warmup
+            type: boolean
+            default: false
+            maps_to: tests.rhaiis.warmup
+          - key: profiler
+            label: Profiler
+            type: boolean
+            default: false
+            maps_to: rhaiis.profiler.enabled
+          - key: slack
+            label: Slack Notifications
+            type: boolean
+            default: true
+            maps_to: tests.rhaiis.slack_notify_always
+          - key: slack_member_id
+            label: Slack Member ID
+            type: text
+            visible_if: {field: slack, equals: true}
+            maps_to: tests.rhaiis.slack_member_id
+          - key: agent_analysis
+            label: Agent Analysis (uses tokens)
+            type: boolean
+            default: false
+            maps_to: rhaiis.agent_analysis.enabled
+          - key: compare_versions
+            label: Compare Versions
+            type: boolean
+            default: false
+            maps_to: rhaiis.compare_versions.enabled
+          - key: csv_dashboard
+            label: Push to Staging Dashboard
+            type: boolean
+            default: false
+            maps_to: caliper.postprocess.csv_dashboard.enabled
+          - key: raw_overrides
+            label: Additional Config Overrides (JSON)
+            type: textarea
+            placeholder: '{"some.config.key": "value"}'
+
+  - id: cpt
+    label: CPT Pipeline
+    kind: matrix
+    presets_ref:
+      dir: presets.d
+    matrix:
+      marker_key: __cpt
+      models_key: __models
+      workloads_key: __workloads
+      label_key: __description
+      tp_key: __tp
+    dimensions: [model, workload]
+    sections:
+      - id: infra
+        label: Infrastructure
+        fields:
+          - key: accelerator
+            label: Accelerator
+            type: radio
+            required: true
+            maps_to: rhaiis.accelerator
+          - key: engine
+            label: Engine
+            type: select
+            required: true
+            maps_to: rhaiis.engine
+    # NOTE: no presets.d entries are currently tagged `__cpt: true` in the
+    # live Forge repo, so this mode resolves to zero pipelines today. Once
+    # RHAIIS publishes real `__cpt` pipeline presets, they show up here
+    # automatically — no Control Center change required.

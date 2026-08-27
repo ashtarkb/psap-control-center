@@ -454,6 +454,16 @@ export const fournosApi = {
     return data
   },
 
+  getProjectUiSchema: async (name: string) => {
+    const { data } = await api.get(`/fournos/projects/${name}/ui-schema`)
+    return data
+  },
+
+  refreshProjectUiSchema: async (name: string) => {
+    const { data } = await api.post(`/fournos/projects/${name}/ui-schema/refresh`)
+    return data
+  },
+
   listPipelines: async () => {
     const { data } = await api.get('/fournos/pipelines')
     return data
@@ -496,6 +506,11 @@ export const fournosApi = {
 
   getGithubPRs: async () => {
     const { data } = await api.get('/fournos/github/open-prs')
+    return data
+  },
+
+  submitMatrix: async (req: import('../types').SubmitMatrixRequest) => {
+    const { data } = await api.post('/fournos/submit-matrix', req)
     return data
   },
 }

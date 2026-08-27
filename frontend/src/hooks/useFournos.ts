@@ -11,6 +11,9 @@ import type {
   SubmitJobRequest,
   SubmitJobResponse,
   CreateScheduleRequest,
+  SubmitMatrixRequest,
+  SubmitMatrixResponse,
+  ProjectUiSchemaResponse,
 } from '../types'
 
 // ─── Jobs ──────────────────────────────────────────────────────────────
@@ -107,6 +110,26 @@ export function useForgeProjectInfo(name: string | undefined) {
   })
 }
 
+export function useProjectUiSchema(name: string | undefined) {
+  return useQuery<ProjectUiSchemaResponse>({
+    queryKey: ['project-ui-schema', name],
+    queryFn: () => fournosApi.getProjectUiSchema(name!),
+    enabled: !!name,
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  })
+}
+
+export function useRefreshProjectUiSchema() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (name: string) => fournosApi.refreshProjectUiSchema(name),
+    onSuccess: (_data, name) => {
+      qc.invalidateQueries({ queryKey: ['project-ui-schema', name] })
+    },
+  })
+}
+
 export function usePipelines() {
   return useQuery<string[]>({
     queryKey: ['fournos-pipelines'],
@@ -181,5 +204,19 @@ export function useGithubPRs() {
     queryKey: ['github-prs'],
     queryFn: () => fournosApi.getGithubPRs(),
     staleTime: 60 * 1000,
+  })
+}
+
+// ─── Matrix (pipeline/CPT-style) submission ────────────────────────────
+// Generic across every project — driven entirely by a `kind: matrix` mode
+// in that project's ui/submit.yaml, no project-specific code.
+
+export function useSubmitMatrix() {
+  const qc = useQueryClient()
+  return useMutation<SubmitMatrixResponse, Error, SubmitMatrixRequest>({
+    mutationFn: (req) => fournosApi.submitMatrix(req),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['fournos-jobs'] })
+    },
   })
 }

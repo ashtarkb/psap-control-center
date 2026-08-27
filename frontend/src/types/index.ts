@@ -482,6 +482,9 @@ export interface FournosPod {
   ready: boolean
   restarts: number
   age_minutes: number
+  exit_code: number | null
+  term_reason: string
+  term_message: string
 }
 
 export interface CurrentStep {
@@ -574,17 +577,152 @@ export interface SubmitJobRequest {
   cluster: string
   pipeline: string
   preset: string
+  args?: string[]
   version: string
   owner: string
   exclusive: boolean
   config_overrides: Record<string, string>
   pull_sha: string
+  priority?: string
+  gpu_type?: string
+  gpu_count?: number
 }
 
 export interface SubmitJobResponse {
   status: string
   job_name: string
   redirect: string
+}
+
+// ─── Matrix (pipeline/CPT-style) submission ────────────────────────────
+// Generic across every project whose ui/submit.yaml declares a
+// `kind: matrix` mode — not project-specific.
+
+export interface SubmitMatrixModelInput {
+  key: string
+  overrides: Record<string, unknown>
+  gpu_count?: number | null
+}
+
+export interface SubmitMatrixRequest {
+  project: string
+  cluster: string
+  pipeline: string
+  args: string[]
+  config_overrides: Record<string, string>
+  models: SubmitMatrixModelInput[]
+  workloads: string[]
+  owner: string
+  priority: string
+  exclusive: boolean
+  pull_sha: string
+  gpu_type: string
+}
+
+export interface SubmitMatrixResultItem {
+  model: string
+  job_name?: string | null
+  status: string
+  error?: string | null
+}
+
+export interface SubmitMatrixResponse {
+  status: string
+  jobs: SubmitMatrixResultItem[]
+  total: number
+}
+
+// ─── Generic project UI schema (projects/<name>/ui/submit.yaml) ───────
+
+export interface UiOption {
+  value: string
+  label: string
+  overrides: Record<string, unknown>
+  extra: Record<string, unknown>
+}
+
+export interface UiVisibleIf {
+  field: string
+  equals?: unknown
+  one_of?: unknown[]
+}
+
+export interface UiField {
+  key: string
+  label: string
+  type: 'text' | 'textarea' | 'number' | 'boolean' | 'select' | 'multiselect' | 'radio' | 'hidden'
+  required: boolean
+  default?: unknown
+  help: string
+  placeholder: string
+  maps_to?: string | null
+  options: UiOption[]
+  visible_if?: UiVisibleIf | null
+  min?: number | null
+  max?: number | null
+}
+
+export interface UiSection {
+  id: string
+  label: string
+  fields: UiField[]
+}
+
+export interface UiQuickPreset {
+  key: string
+  label: string
+  fills: Record<string, unknown>
+  overrides: Record<string, unknown>
+}
+
+export interface UiMatrixConfig {
+  marker_key: string
+  models_key: string
+  workloads_key: string
+  label_key: string
+  tp_key: string
+}
+
+export interface UiPipelineModel {
+  key: string
+  label: string
+  overrides: Record<string, unknown>
+  tp?: number | null
+}
+
+export interface UiPipeline {
+  key: string
+  label: string
+  models: UiPipelineModel[]
+  workloads: string[]
+  overrides: Record<string, unknown>
+}
+
+export interface UiMode {
+  id: string
+  label: string
+  default: boolean
+  kind: 'form' | 'matrix'
+  sections: UiSection[]
+  quick_presets: UiQuickPreset[]
+  matrix?: UiMatrixConfig | null
+  pipelines: UiPipeline[]
+  dimensions: string[]
+}
+
+export interface ProjectUiSchema {
+  schema_version: number
+  project: string
+  title: string
+  description: string
+  defaults: Record<string, unknown>
+  modes: UiMode[]
+}
+
+export interface ProjectUiSchemaResponse {
+  found: boolean
+  project: string
+  ui_schema: ProjectUiSchema | null
 }
 
 export interface CreateScheduleRequest {
