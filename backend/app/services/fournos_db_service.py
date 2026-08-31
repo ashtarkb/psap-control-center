@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any, Optional, Sequence, Tuple
 from uuid import uuid4
 
@@ -13,6 +14,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.fournos_job import FournosJob, FournosJobEvent
 
 logger = logging.getLogger(__name__)
+
+# History is meant to be "jobs that ran end to end" — recurring *templates*
+# and cluster locks have their own tabs (Schedules/Locks) and never belong
+# here, and a job that's still live shouldn't show up twice (once live,
+# once mid-run in history) before it actually finishes.
+TERMINAL_STATUSES = ("Succeeded", "Failed", "Stopped")
+
+# Maps the sortable keys the frontend's table headers use to actual
+# columns — "date" means "when it finished" (completed_at), which is what
+# history is naturally ordered by; duration/name/etc. are exposed too so
+# every column header can drive the sort.
+_SORT_COLUMNS = {
+    "name": FournosJob.name,
+    "project": FournosJob.project,
+    "cluster": FournosJob.cluster,
+    "status": FournosJob.status,
+    "owner": FournosJob.owner,
+    "date": FournosJob.completed_at,
+    "duration": FournosJob.duration_seconds,
+    "triggered_by": FournosJob.triggered_by_schedule,
+}
 
 
 async def upsert_job(session: AsyncSession, **kwargs: Any) -> FournosJob:
@@ -62,11 +84,23 @@ async def list_jobs(
     cluster: Optional[str] = None,
     status: Optional[str] = None,
     owner: Optional[str] = None,
+    created_after: Optional[datetime] = None,
+    created_before: Optional[datetime] = None,
+    sort_by: Optional[str] = None,
+    sort_dir: str = "desc",
     limit: int = 50,
     offset: int = 0,
 ) -> Tuple[Sequence[FournosJob], int]:
-    stmt = select(FournosJob)
-    count_stmt = select(func.count(FournosJob.id))
+    stmt = select(FournosJob).where(
+        FournosJob.status.in_(TERMINAL_STATUSES),
+        FournosJob.is_lock.is_(False),
+        FournosJob.trigger_type != "recurring-parent",
+    )
+    count_stmt = select(func.count(FournosJob.id)).where(
+        FournosJob.status.in_(TERMINAL_STATUSES),
+        FournosJob.is_lock.is_(False),
+        FournosJob.trigger_type != "recurring-parent",
+    )
 
     if project:
         stmt = stmt.where(FournosJob.project == project)
@@ -80,10 +114,16 @@ async def list_jobs(
     if owner:
         stmt = stmt.where(FournosJob.owner == owner)
         count_stmt = count_stmt.where(FournosJob.owner == owner)
+    if created_after:
+        stmt = stmt.where(FournosJob.created_at >= created_after)
+        count_stmt = count_stmt.where(FournosJob.created_at >= created_after)
+    if created_before:
+        stmt = stmt.where(FournosJob.created_at <= created_before)
+        count_stmt = count_stmt.where(FournosJob.created_at <= created_before)
 
-    stmt = (
-        stmt.order_by(FournosJob.created_at.desc()).limit(limit).offset(offset)
-    )
+    sort_col = _SORT_COLUMNS.get(sort_by or "date", FournosJob.completed_at)
+    order_by = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
+    stmt = stmt.order_by(order_by).limit(limit).offset(offset)
 
     result = await session.execute(stmt)
     jobs = result.scalars().all()

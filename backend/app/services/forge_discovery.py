@@ -145,11 +145,6 @@ def get_project(name: str) -> Optional[ProjectInfo]:
     return next((p for p in projects if p.name == name), None)
 
 
-def get_project_presets(name: str) -> List[str]:
-    proj = get_project(name)
-    return proj.presets if proj else []
-
-
 def _load_presets(orchestration_dir: Path) -> List[str]:
     presets_dir = orchestration_dir / "presets.d"
     if not presets_dir.is_dir():

@@ -24,9 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import urllib.error
-from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import yaml
@@ -45,7 +43,17 @@ from app.services.github_content import fetch_yaml, list_yamls
 
 logger = logging.getLogger(__name__)
 
+# Only these field types actually render a list of selectable options —
+# a preset that touches just one `text`/`boolean`/etc. override field's
+# `maps_to` key isn't offering a choice, it's incidental (see
+# `_resolve_mode_presets`).
+_OPTION_FIELD_TYPES = {"select", "radio", "multiselect"}
+
 _cache: Dict[str, Optional[ProjectUiSchema]] = {}
+# In-flight fetch per project, so concurrent get/refresh calls for the same
+# project (e.g. two people hitting "Refresh" at once) share a single GitHub
+# fetch instead of each firing their own.
+_inflight: Dict[str, "asyncio.Future[Optional[ProjectUiSchema]]"] = {}
 
 
 def _schema_path(project: str) -> str:
@@ -159,14 +167,17 @@ def _resolve_mode_presets(project: str, mode: UiMode) -> None:
 
         if len(matched) >= 2:
             compound_candidates.append((key, overrides, matched))
-        elif len(matched) == 1:
+        elif len(matched) == 1 and matched[0].type in _OPTION_FIELD_TYPES:
             field = matched[0]
             field.options.append(
                 UiOption(value=key, label=_titleize(key), overrides=dict(overrides))
             )
             value_to_key.setdefault(field.key, {})[str(overrides[field.maps_to])] = key
-        # entries touching none of this mode's declared fields aren't
-        # relevant to this UI and are silently skipped.
+        # Entries touching none of this mode's declared fields, or exactly
+        # one field that isn't a choice-type field (e.g. a `text`/`boolean`
+        # override field an unrelated preset also happens to set — not a
+        # selectable "option" in any meaningful sense for those types),
+        # aren't relevant to this UI and are silently skipped.
 
     # Pass 2: resolve compound presets into quick_presets now that every
     # field's raw-value -> preset-key lookup is complete.
@@ -328,42 +339,20 @@ def _resolve_schema(project: str, schema: ProjectUiSchema) -> ProjectUiSchema:
 # Public API
 # ---------------------------------------------------------------------------
 
-def _load_local_override(project: str) -> Optional[dict]:
-    """Dev-only escape hatch: if UI_SCHEMA_LOCAL_DIR is set, load
-    ``<dir>/<project>.yaml`` from disk instead of fetching from GitHub — for
-    trying out a draft ``ui/submit.yaml`` locally before it's published to
-    the Forge repo. Unset by default; has no effect in normal operation.
-    """
-    local_dir = os.environ.get("UI_SCHEMA_LOCAL_DIR", "")
-    if not local_dir:
-        return None
-    path = Path(local_dir) / "{}.yaml".format(project)
-    if not path.is_file():
-        return None
-    try:
-        with open(path) as f:
-            return yaml.safe_load(f)
-    except Exception as exc:
-        logger.warning("Failed to load local ui/submit.yaml override for %s: %s", project, exc)
-        return None
-
-
 def fetch_schema(project: str) -> Optional[ProjectUiSchema]:
-    """Fetch + resolve a project's ui/submit.yaml. Returns None if the
-    project hasn't published one (or it's invalid).
+    """Fetch + resolve a project's ui/submit.yaml from the Forge GitHub
+    repo. Returns None if the project hasn't published one (or it's
+    invalid).
     """
-    raw = _load_local_override(project)
-
-    if raw is None:
-        try:
-            raw = fetch_yaml(_schema_path(project))
-        except urllib.error.HTTPError as exc:
-            if exc.code != 404:
-                logger.error("Failed to fetch ui/submit.yaml for %s: %s", project, exc)
-            return None
-        except Exception as exc:
+    try:
+        raw = fetch_yaml(_schema_path(project))
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
             logger.error("Failed to fetch ui/submit.yaml for %s: %s", project, exc)
-            return None
+        return None
+    except Exception as exc:
+        logger.error("Failed to fetch ui/submit.yaml for %s: %s", project, exc)
+        return None
 
     if not raw:
         return None
@@ -377,14 +366,44 @@ def fetch_schema(project: str) -> Optional[ProjectUiSchema]:
     return _resolve_schema(project, schema)
 
 
+async def _fetch_and_cache(project: str) -> Optional[ProjectUiSchema]:
+    result = await asyncio.to_thread(fetch_schema, project)
+    _cache[project] = result
+    return result
+
+
+async def _fetch_coalesced(project: str) -> Optional[ProjectUiSchema]:
+    """Run fetch_schema(project), coalescing concurrent callers onto a
+    single in-flight fetch. If a fetch for this project is already running,
+    piggyback on it instead of starting a second one — only the first
+    caller actually hits GitHub, everyone else just awaits that same
+    result. The previous cached value (if any) is left in place until the
+    new fetch resolves, so readers never see a "no schema" flash mid-refresh.
+    """
+    future = _inflight.get(project)
+    if future is not None:
+        return await future
+
+    future = asyncio.ensure_future(_fetch_and_cache(project))
+    _inflight[project] = future
+    try:
+        return await future
+    finally:
+        _inflight.pop(project, None)
+
+
 async def get_schema(project: str) -> Optional[ProjectUiSchema]:
-    """Return the cached schema for a project, fetching it on first use."""
-    if project not in _cache:
-        _cache[project] = await asyncio.to_thread(fetch_schema, project)
-    return _cache[project]
+    """Return the cached schema for a project, fetching it on first use.
+    Never refetches once cached — call refresh_schema() to force that.
+    """
+    if project in _cache:
+        return _cache[project]
+    return await _fetch_coalesced(project)
 
 
 async def refresh_schema(project: str) -> Optional[ProjectUiSchema]:
-    """Force-refresh the cached ui/submit.yaml for a project from GitHub."""
-    _cache.pop(project, None)
-    return await get_schema(project)
+    """Force-refresh a single project's ui/submit.yaml from GitHub.
+
+    Safe to call concurrently for the same project — see _fetch_coalesced.
+    """
+    return await _fetch_coalesced(project)

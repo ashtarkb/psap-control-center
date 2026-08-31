@@ -84,8 +84,20 @@ def _extract_forge_fields(job: dict) -> dict:
         duration_seconds = (completed_at - created_at).total_seconds()
 
     labels = meta.get("labels", {})
-    schedule_name = labels.get("fournos-launcher/schedule-name", "")
-    trigger_type = labels.get("fournos-launcher/trigger-type", "manual")
+    # Native Fournos recurring-job label (fournos.dev/recurring-parent) —
+    # set by the operator itself on every child it stamps out from a
+    # recurring template (see fournos/fournos/handlers/lifecycle.py). A job
+    # with no parent but its own spec.schedule *is* the recurring template;
+    # one with spec.scheduledStartTime is a one-off deferred job.
+    schedule_name = labels.get(k8s_client.LABEL_RECURRING_PARENT, "")
+    if schedule_name:
+        trigger_type = "recurring"
+    elif spec.get("scheduledStartTime"):
+        trigger_type = "deferred"
+    elif spec.get("schedule"):
+        trigger_type = "recurring-parent"
+    else:
+        trigger_type = "manual"
 
     return {
         "name": meta.get("name", ""),
@@ -105,6 +117,7 @@ def _extract_forge_fields(job: dict) -> dict:
         "fjob_status": status,
         "triggered_by_schedule": schedule_name or None,
         "trigger_type": trigger_type,
+        "is_lock": bool(spec.get("lockOnly")),
     }
 
 

@@ -447,6 +447,9 @@ export interface FournosJobSummary {
   mlflow_url: string
   trigger_type: string
   triggered_by_schedule: string | null
+  /** Actual planned start for a deferred one-off job — distinct from
+   * created_at (when the CR was created). Powers the scheduling calendar. */
+  scheduled_start_time: string | null
   source: 'live' | 'history'
 }
 
@@ -526,34 +529,81 @@ export interface FournosJobEvent {
   timestamp: string | null
 }
 
-export interface FournosSchedule {
+// ─── Recurring jobs & cluster locks ─────────────────────────────────────
+// Not separate resources — both are FournosJobs (spec.schedule /
+// spec.lockOnly respectively), exactly as the operator itself models them.
+// See docs on fournos/fournos/handlers/lifecycle.py + execution.py.
+
+export interface RecurringJob {
   name: string
-  namespace: string
-  schedule: string
-  suspend: boolean
   project: string
   cluster: string
   pipeline: string
   preset: string
   owner: string
-  has_resolver: boolean
-  resolver_configmap: string
-  resolver_image: string
-  resolver_filename: string
+  schedule: string // cron expression, UTC
+  phase: string
+  message: string
+  last_scheduled_time: string | null
   created_at: string
-  last_schedule: string
-  active_count: number
 }
 
-export interface ScheduleRun {
+export interface ScheduleChildJob {
   name: string
   status: string
-  preset: string
   trigger_type: string
   duration_seconds: number | null
   mlflow_url: string
   created_at: string
 }
+
+/** @deprecated kept as an alias for ScheduleChildJob during the Schedules-tab rename */
+export type ScheduleRun = ScheduleChildJob
+
+export interface ClusterLock {
+  name: string
+  cluster: string
+  owner: string
+  reason: string
+  phase: string
+  lock_until: string | null
+  scheduled_start_time: string | null
+  created_at: string
+}
+
+export interface CreateClusterLockRequest {
+  cluster: string
+  owner: string
+  reason: string
+  /** Lock is one-time only — omit for "held indefinitely until released". */
+  lock_until?: string | null
+  scheduled_start_time?: string | null
+}
+
+export interface ClusterOverview {
+  cluster: string
+  current_jobs: FournosJobSummary[]
+  recurring_jobs: RecurringJob[]
+  locks: ClusterLock[]
+}
+
+/** An ephemeral "someone else is booking this slot right now" claim on the
+ * scheduling calendar — not a Fournos concept, purely a Control Center UX
+ * nicety to stop two users racing on the same slot. See
+ * slot_hold_service.py. */
+export interface SlotHold {
+  cluster: string
+  start_time: string // ISO 8601 UTC, truncated to the slot granularity
+  held_by: string
+  expires_at: string
+}
+
+/** When a Submit-page job should run — threaded into SubmitJobRequest /
+ * SubmitMatrixRequest as `schedule` / `scheduled_start_time` (both UTC). */
+export type JobScheduling =
+  | { mode: 'now' }
+  | { mode: 'defer'; scheduledStartTimeUtc: string; label: string }
+  | { mode: 'recurring'; scheduleUtc: string; label: string }
 
 export interface ForgeProject {
   name: string
@@ -586,6 +636,10 @@ export interface SubmitJobRequest {
   priority?: string
   gpu_type?: string
   gpu_count?: number
+  /** ISO 8601 UTC — mutually exclusive with `schedule`. Job stays Scheduled until this time. */
+  scheduled_start_time?: string | null
+  /** Cron expression, UTC — mutually exclusive with `scheduled_start_time`. Makes this a recurring template. */
+  schedule?: string
 }
 
 export interface SubmitJobResponse {
@@ -617,6 +671,8 @@ export interface SubmitMatrixRequest {
   exclusive: boolean
   pull_sha: string
   gpu_type: string
+  scheduled_start_time?: string | null
+  schedule?: string
 }
 
 export interface SubmitMatrixResultItem {
@@ -647,6 +703,11 @@ export interface UiVisibleIf {
   one_of?: unknown[]
 }
 
+export interface UiOptionRestriction {
+  when: UiVisibleIf
+  exclude_values: string[]
+}
+
 export interface UiField {
   key: string
   label: string
@@ -658,6 +719,7 @@ export interface UiField {
   maps_to?: string | null
   options: UiOption[]
   visible_if?: UiVisibleIf | null
+  restrict_if: UiOptionRestriction[]
   min?: number | null
   max?: number | null
 }
@@ -725,16 +787,3 @@ export interface ProjectUiSchemaResponse {
   ui_schema: ProjectUiSchema | null
 }
 
-export interface CreateScheduleRequest {
-  name: string
-  project: string
-  cluster: string
-  pipeline: string
-  preset: string
-  cron_expr: string
-  image_source: string
-  owner: string
-  resolver_script: string
-  resolver_image: string
-  resolver_filename: string
-}

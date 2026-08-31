@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeftIcon, ArrowPathIcon, PlayIcon } from '@heroicons/react/24/outline'
+import { ArrowLeftIcon, ArrowPathIcon, ClockIcon, PlayIcon } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
 import ReviewRow, { ReviewSection } from './ReviewRow'
+import YamlPreview from './YamlPreview'
 import { useSubmitJob, useSubmitMatrix } from '../hooks/useFournos'
-import type { ProjectUiSchema, UiField, UiMode, UiPipeline, UiQuickPreset } from '../types'
+import { buildMatrixJobPreviews, buildSingleJobPreview, toYamlPreview } from '../utils/fournosJobPreview'
+import type { JobScheduling, ProjectUiSchema, UiField, UiMode, UiOption, UiPipeline, UiQuickPreset, UiVisibleIf } from '../types'
 
 // ─── Generic, schema-driven submit form ────────────────────────────────
 //
@@ -33,6 +35,15 @@ export interface SubmitBasics {
   pullSha: string
   /** Human-readable label for the review step, e.g. "#123 — title (author)". */
   prLabel: string
+  /** When this job (or recurring template) should run — see ClusterScheduleModal. */
+  scheduling: JobScheduling
+}
+
+/** SubmitJobRequest/SubmitMatrixRequest's schedule/scheduled_start_time pair for a given choice. */
+function schedulingRequestFields(scheduling: JobScheduling): { schedule: string; scheduled_start_time: string | null } {
+  if (scheduling.mode === 'defer') return { schedule: '', scheduled_start_time: scheduling.scheduledStartTimeUtc }
+  if (scheduling.mode === 'recurring') return { schedule: scheduling.scheduleUtc, scheduled_start_time: null }
+  return { schedule: '', scheduled_start_time: null }
 }
 
 function defaultValueFor(field: UiField): unknown {
@@ -46,13 +57,49 @@ function fieldsOf(mode: UiMode): UiField[] {
   return mode.sections.flatMap((s) => s.fields)
 }
 
-function isFieldVisible(field: UiField, values: Record<string, unknown>): boolean {
-  const cond = field.visible_if
-  if (!cond) return true
+function matchesCondition(cond: UiVisibleIf, values: Record<string, unknown>): boolean {
   const current = values[cond.field]
   if (cond.equals !== undefined) return current === cond.equals
   if (cond.one_of) return cond.one_of.includes(current)
   return true
+}
+
+function isFieldVisible(field: UiField, values: Record<string, unknown>): boolean {
+  const cond = field.visible_if
+  if (!cond) return true
+  return matchesCondition(cond, values)
+}
+
+/**
+ * This field's options, narrowed by any `restrict_if` rules whose `when`
+ * condition currently matches (e.g. dropping `amd` from `accelerator` once
+ * `engine == trt-llm`). Applies uniformly regardless of whether the options
+ * came from literal `options:`, `options_ref`, or a `presets_ref` pool.
+ */
+function visibleOptions(field: UiField, values: Record<string, unknown>): UiOption[] {
+  if (!field.restrict_if || field.restrict_if.length === 0) return field.options
+  const excluded = new Set<string>()
+  for (const rule of field.restrict_if) {
+    if (matchesCondition(rule.when, values)) {
+      for (const v of rule.exclude_values) excluded.add(v)
+    }
+  }
+  if (excluded.size === 0) return field.options
+  return field.options.filter((o) => !excluded.has(o.value))
+}
+
+/**
+ * A `maps_to` may reference other fields' current values via `{fieldKey}`
+ * placeholders — e.g. RHAIIS's per-accelerator engine image override,
+ * `rhaiis.engines.{engine}.images.{accelerator}`, composes the real Forge
+ * override key from two other fields rather than a single fixed one.
+ * Fields with no placeholders resolve to themselves unchanged.
+ */
+function resolveMapsTo(mapsTo: string, values: Record<string, unknown>): string {
+  return mapsTo.replace(/\{(\w+)\}/g, (_match, key: string) => {
+    const v = values[key]
+    return typeof v === 'string' ? v : ''
+  })
 }
 
 function stringifyValue(value: unknown): string {
@@ -102,6 +149,7 @@ export default function DynamicSubmitForm({
   onBack,
   onNext,
   onSubmitted,
+  onOpenScheduleModal,
 }: {
   project: string
   schema: ProjectUiSchema
@@ -111,6 +159,10 @@ export default function DynamicSubmitForm({
   onBack: () => void
   onNext: () => void
   onSubmitted?: (name: string) => void
+  /** Opens the shared ClusterScheduleModal (owned by the parent page) — the
+   * "Defer / Set Recurring…" decision lives on this review step, once
+   * every other field is finalized, not earlier in the wizard. */
+  onOpenScheduleModal: () => void
 }) {
   const submitJob = useSubmitJob()
   const submitMatrix = useSubmitMatrix()
@@ -163,6 +215,28 @@ export default function DynamicSubmitForm({
     setValues((prev) => ({ ...prev, [key]: value }))
   }
 
+  // If a `restrict_if` rule now excludes a field's currently-selected
+  // value (e.g. the user just switched `engine` to `trt-llm` while
+  // `accelerator` was set to `amd`), clear it so the form never submits a
+  // stale, now-invalid combination — the user re-picks from what's left.
+  useEffect(() => {
+    if (!activeMode) return
+    for (const field of fieldsOf(activeMode)) {
+      if (!field.restrict_if || field.restrict_if.length === 0) continue
+      const allowed = visibleOptions(field, values)
+      const allowedValues = new Set(allowed.map((o) => o.value))
+      const current = values[field.key]
+      if (field.type === 'multiselect') {
+        if (!Array.isArray(current)) continue
+        const filtered = (current as string[]).filter((v) => allowedValues.has(v))
+        if (filtered.length !== current.length) setFieldValue(field.key, filtered)
+      } else if (typeof current === 'string' && current && !allowedValues.has(current)) {
+        setFieldValue(field.key, '')
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeMode, values])
+
   const applyQuickPreset = (qp: UiQuickPreset) => {
     const wasActive = quickPresetKey === qp.key
     setQuickPresetKey(wasActive ? '' : qp.key)
@@ -207,7 +281,9 @@ export default function DynamicSubmitForm({
 
       if (field.maps_to) {
         if (value === undefined || value === '' || value === null) continue
-        overrides[field.maps_to] = stringifyValue(value)
+        const key = resolveMapsTo(field.maps_to, values)
+        if (!key) continue
+        overrides[key] = stringifyValue(value)
       } else if (field.type === 'select' || field.type === 'radio') {
         if (typeof value === 'string' && value) args.push(value)
       } else if (field.type === 'multiselect' && Array.isArray(value)) {
@@ -247,6 +323,7 @@ export default function DynamicSubmitForm({
           exclusive: basics.exclusive,
           pull_sha: basics.pullSha,
           gpu_type: '',
+          ...schedulingRequestFields(basics.scheduling),
         })
         onSubmitted?.(result.jobs?.[0]?.job_name || '')
       } catch {
@@ -269,6 +346,7 @@ export default function DynamicSubmitForm({
         config_overrides: configOverrides,
         pull_sha: basics.pullSha,
         priority: basics.priority,
+        ...schedulingRequestFields(basics.scheduling),
       })
       onSubmitted?.(result.job_name)
     } catch {
@@ -285,8 +363,8 @@ export default function DynamicSubmitForm({
   if (step !== 2 && step !== 3) return null
 
   const canSubmit = isMatrix
-    ? !submitMatrix.isPending && !!basics.cluster && !!selectedPipeline && selectedModels.length > 0 && selectedWorkloads.length > 0
-    : !submitJob.isPending && !!basics.cluster
+    ? !submitMatrix.isPending && !!basics.cluster && !!basics.owner.trim() && !!selectedPipeline && selectedModels.length > 0 && selectedWorkloads.length > 0
+    : !submitJob.isPending && !!basics.cluster && !!basics.owner.trim()
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
@@ -354,6 +432,7 @@ export default function DynamicSubmitForm({
                         field={field}
                         value={values[field.key]}
                         onChange={(v) => setFieldValue(field.key, v)}
+                        options={visibleOptions(field, values)}
                       />
                       {field.help && <p className="mt-1 text-xs text-gray-400">{field.help}</p>}
                     </div>
@@ -488,97 +567,172 @@ export default function DynamicSubmitForm({
         </>
       )}
 
-      {step === 3 && (
-        <>
-          {(submitJob.error || submitMatrix.error) && (
-            <div className="rounded-lg bg-red-50 p-4 text-sm text-red-700">
-              {(submitJob.error || submitMatrix.error)?.message}
-            </div>
-          )}
+      {step === 3 && (() => {
+        const { args, overrides } = collectSharedArgsAndOverrides()
+        const shared = {
+          project,
+          cluster: basics.cluster,
+          pipeline: basics.pipeline,
+          owner: basics.owner,
+          priority: basics.priority,
+          exclusive: basics.exclusive,
+          pullSha: basics.pullSha,
+          args,
+          configOverrides: overrides,
+          schedule: basics.scheduling.mode === 'recurring' ? basics.scheduling.scheduleUtc : '',
+          scheduledStartTime: basics.scheduling.mode === 'defer' ? basics.scheduling.scheduledStartTimeUtc : null,
+        }
+        const yamlText = isMatrix
+          ? selectedPipeline
+            ? toYamlPreview(
+                buildMatrixJobPreviews({
+                  ...shared,
+                  models: selectedModels.map((key) => {
+                    const m = selectedPipeline.models.find((mm) => mm.key === key)
+                    return {
+                      key,
+                      overrides: stringifyOverrides(m?.overrides || {}),
+                      gpuCount: m?.tp ?? null,
+                    }
+                  }),
+                  workloads: selectedWorkloads,
+                })
+              )
+            : ''
+          : toYamlPreview(buildSingleJobPreview(shared))
 
-          {(allModes.length > 1 || quickPresetKey) && (
-            <ReviewSection>
-              {allModes.length > 1 && <ReviewRow label="Mode" value={activeMode.label || activeMode.id} />}
-              {quickPresetKey && (
+        return (
+          <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_380px] lg:gap-6 lg:items-start">
+            <div className="space-y-4 min-w-0">
+              <ReviewSection title="Basics">
+                <ReviewRow label="Project" value={project} />
+                <ReviewRow label="Cluster" value={basics.cluster} missing={!basics.cluster} />
+                <ReviewRow label="Pipeline" value={basics.pipeline} />
+                {basics.owner && <ReviewRow label="Owner" value={basics.owner} />}
+                <ReviewRow label="Priority" value={basics.priority} />
+                {basics.exclusive && <ReviewRow label="Exclusive" value="Yes" />}
+                {basics.pullSha && (
+                  <ReviewRow label="Pull Request" value={basics.prLabel} mono={!basics.prLabel || basics.prLabel === basics.pullSha} />
+                )}
                 <ReviewRow
-                  label="Quick Preset"
-                  value={activeMode.quick_presets.find((p) => p.key === quickPresetKey)?.label || quickPresetKey}
+                  label="Schedule"
+                  value={
+                    basics.scheduling.mode === 'now'
+                      ? 'Run now'
+                      : basics.scheduling.mode === 'defer'
+                        ? `Deferred — ${basics.scheduling.label}`
+                        : `Recurring — ${basics.scheduling.label}`
+                  }
                 />
-              )}
-            </ReviewSection>
-          )}
-
-          {activeMode.sections.map((section) => {
-            const rows = section.fields
-              .filter((f) => f.type !== 'hidden' && isFieldVisible(f, values))
-              .map((field) => ({ field, display: formatFieldValueForReview(field, values[field.key]) }))
-              .filter(({ field, display }) => field.required || display !== null)
-            if (rows.length === 0) return null
-            return (
-              <ReviewSection key={section.id} title={section.label}>
-                {rows.map(({ field, display }) => (
-                  <ReviewRow
-                    key={field.key}
-                    label={field.label || field.key}
-                    value={display}
-                    missing={display === null}
-                  />
-                ))}
               </ReviewSection>
-            )
-          })}
 
-          {isMatrix && (
-            <ReviewSection title="Matrix Selection">
-              <ReviewRow
-                label="Pipeline"
-                value={selectedPipeline?.label || selectedPipeline?.key}
-                missing={!selectedPipeline}
-              />
-              <ReviewRow
-                label="Models"
-                value={selectedModels
-                  .map((k) => selectedPipeline?.models.find((m) => m.key === k)?.label || k)
-                  .join(', ')}
-                missing={selectedModels.length === 0}
-              />
-              <ReviewRow
-                label="Workloads"
-                value={selectedWorkloads.join(', ')}
-                missing={selectedWorkloads.length === 0}
-              />
-            </ReviewSection>
-          )}
-
-          {!canSubmit && (
-            <p className="text-xs text-orange-600">
-              Some required fields above are missing — fill them in on the previous step before submitting.
-            </p>
-          )}
-
-          <div className="flex justify-between">
-            <button
-              type="button"
-              onClick={onBack}
-              className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-            >
-              <ArrowLeftIcon className="h-4 w-4" /> Back
-            </button>
-            <button
-              type="submit"
-              disabled={!canSubmit}
-              className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
-            >
-              {submitJob.isPending || submitMatrix.isPending ? (
-                <ArrowPathIcon className="h-4 w-4 animate-spin" />
-              ) : (
-                <PlayIcon className="h-4 w-4" />
+              {(submitJob.error || submitMatrix.error) && (
+                <div className="rounded-lg bg-red-50 p-4 text-sm text-red-700">
+                  {(submitJob.error || submitMatrix.error)?.message}
+                </div>
               )}
-              {isMatrix ? `Submit ${selectedModels.length || ''} Job(s)` : 'Submit Job'}
-            </button>
+
+              {(allModes.length > 1 || quickPresetKey) && (
+                <ReviewSection>
+                  {allModes.length > 1 && <ReviewRow label="Mode" value={activeMode.label || activeMode.id} />}
+                  {quickPresetKey && (
+                    <ReviewRow
+                      label="Quick Preset"
+                      value={activeMode.quick_presets.find((p) => p.key === quickPresetKey)?.label || quickPresetKey}
+                    />
+                  )}
+                </ReviewSection>
+              )}
+
+              {activeMode.sections.map((section) => {
+                const rows = section.fields
+                  .filter((f) => f.type !== 'hidden' && isFieldVisible(f, values))
+                  .map((field) => ({ field, display: formatFieldValueForReview(field, values[field.key]) }))
+                  .filter(({ field, display }) => field.required || display !== null)
+                if (rows.length === 0) return null
+                return (
+                  <ReviewSection key={section.id} title={section.label}>
+                    {rows.map(({ field, display }) => (
+                      <ReviewRow
+                        key={field.key}
+                        label={field.label || field.key}
+                        value={display}
+                        missing={display === null}
+                      />
+                    ))}
+                  </ReviewSection>
+                )
+              })}
+
+              {isMatrix && (
+                <ReviewSection title="Matrix Selection">
+                  <ReviewRow
+                    label="Pipeline"
+                    value={selectedPipeline?.label || selectedPipeline?.key}
+                    missing={!selectedPipeline}
+                  />
+                  <ReviewRow
+                    label="Models"
+                    value={selectedModels
+                      .map((k) => selectedPipeline?.models.find((m) => m.key === k)?.label || k)
+                      .join(', ')}
+                    missing={selectedModels.length === 0}
+                  />
+                  <ReviewRow
+                    label="Workloads"
+                    value={selectedWorkloads.join(', ')}
+                    missing={selectedWorkloads.length === 0}
+                  />
+                </ReviewSection>
+              )}
+
+              {!canSubmit && (
+                <p className="text-xs text-orange-600">
+                  Some required fields above are missing — fill them in on the previous step before submitting.
+                </p>
+              )}
+
+              <div className="flex justify-between">
+                <button
+                  type="button"
+                  onClick={onBack}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                >
+                  <ArrowLeftIcon className="h-4 w-4" /> Back
+                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={onOpenScheduleModal}
+                    disabled={!basics.cluster}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                    title={!basics.cluster ? 'Pick a cluster first' : undefined}
+                  >
+                    <ClockIcon className="h-4 w-4" />
+                    Defer / Set Recurring…
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!canSubmit}
+                    className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
+                  >
+                    {submitJob.isPending || submitMatrix.isPending ? (
+                      <ArrowPathIcon className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <PlayIcon className="h-4 w-4" />
+                    )}
+                    {isMatrix ? `Submit ${selectedModels.length || ''} Job(s)` : 'Submit Job'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 lg:mt-0 lg:sticky lg:top-4">
+              <YamlPreview yaml={yamlText} />
+            </div>
           </div>
-        </>
-      )}
+        )
+      })()}
     </form>
   )
 }
@@ -589,11 +743,15 @@ function FieldControl({
   field,
   value,
   onChange,
+  options,
 }: {
   field: UiField
   value: unknown
   onChange: (value: unknown) => void
+  /** Defaults to `field.options` — pass a `visibleOptions(field, values)` result to apply `restrict_if`. */
+  options?: UiOption[]
 }) {
+  const opts = options ?? field.options
   switch (field.type) {
     case 'boolean':
       return (
@@ -642,7 +800,7 @@ function FieldControl({
           className="input mt-1"
         >
           <option value="">{field.required ? 'Select...' : 'None'}</option>
-          {field.options.map((opt) => (
+          {opts.map((opt) => (
             <option key={opt.value} value={opt.value} title={formatOverridesTooltip(opt.overrides)}>
               {opt.label || opt.value}
             </option>
@@ -653,7 +811,7 @@ function FieldControl({
     case 'radio':
       return (
         <div className="mt-2 flex flex-wrap gap-1.5">
-          {field.options.map((opt) => (
+          {opts.map((opt) => (
             <button
               key={opt.value}
               type="button"
@@ -669,7 +827,7 @@ function FieldControl({
               {opt.label || opt.value}
             </button>
           ))}
-          {field.options.length === 0 && <p className="text-xs text-gray-400">None available.</p>}
+          {opts.length === 0 && <p className="text-xs text-gray-400">None available.</p>}
         </div>
       )
 
@@ -679,7 +837,7 @@ function FieldControl({
         onChange(selected.includes(v) ? selected.filter((s) => s !== v) : [...selected, v])
       return (
         <div className="mt-2 flex flex-wrap gap-1.5">
-          {field.options.map((opt) => (
+          {opts.map((opt) => (
             <label
               key={opt.value}
               title={formatOverridesTooltip(opt.overrides)}
@@ -699,7 +857,7 @@ function FieldControl({
               {opt.label || opt.value}
             </label>
           ))}
-          {field.options.length === 0 && <p className="text-xs text-gray-400">None available.</p>}
+          {opts.length === 0 && <p className="text-xs text-gray-400">None available.</p>}
         </div>
       )
     }

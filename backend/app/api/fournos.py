@@ -20,25 +20,28 @@ from app.core.auth import require_admin, require_auth
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.schemas.fournos import (
-    CreateScheduleRequest,
-    FournosJobDetail,
+    ClusterLockResponse,
+    ClusterOverviewResponse,
+    CreateClusterLockRequest,
     FournosJobSummary,
-    FournosPod,
     GitHubPR,
+    HoldSlotRequest,
     JobEventResponse,
     JobListResponse,
-    PipelineStage,
     ProjectInfoResponse,
-    ResolverScriptResponse,
-    ScheduleResponse,
+    RecurringJobResponse,
+    ScheduleChildJobResponse,
+    SlotHoldResponse,
     SubmitJobRequest,
     SubmitJobResponse,
     SubmitMatrixRequest,
     SubmitMatrixResponse,
 )
+from app.services import slot_hold_service as slot_holds
 from app.schemas.ui_schema import ProjectUiSchemaResponse
 from app.services import fournos_db_service as db_svc
 from app.services import fournos_k8s_client as k8s
+from app.services import pipeline_definitions
 from app.services import project_ui_schema
 from app.services.forge_discovery import discover_projects, get_project
 
@@ -93,11 +96,22 @@ def _parse_task_progress(message: str) -> Optional[dict]:
     }
 
 
+def _trigger_type_for_live_job(meta: dict, spec: dict, schedule_parent: str) -> str:
+    if schedule_parent:
+        return "recurring"
+    if spec.get("scheduledStartTime"):
+        return "deferred"
+    if spec.get("schedule"):
+        return "recurring-parent"
+    return "manual"
+
+
 def _live_job_to_summary(job: dict) -> dict:
     meta = job.get("metadata", {})
     spec = job.get("spec", {})
     status = job.get("status", {})
     forge = spec.get("executionEngine", {}).get("forge", {})
+    schedule_parent = meta.get("labels", {}).get(k8s.LABEL_RECURRING_PARENT, "")
 
     return {
         "name": meta.get("name", ""),
@@ -112,12 +126,9 @@ def _live_job_to_summary(job: dict) -> dict:
         "completed_at": None,
         "duration_seconds": None,
         "mlflow_url": "",
-        "trigger_type": meta.get("labels", {}).get(
-            "fournos-launcher/trigger-type", "manual"
-        ),
-        "triggered_by_schedule": meta.get("labels", {}).get(
-            "fournos-launcher/schedule-name"
-        ),
+        "trigger_type": _trigger_type_for_live_job(meta, spec, schedule_parent),
+        "triggered_by_schedule": schedule_parent or None,
+        "scheduled_start_time": spec.get("scheduledStartTime"),
         "source": "live",
     }
 
@@ -191,6 +202,18 @@ def _get_live_jobs_sync() -> list:
     now = datetime.now(timezone.utc)
     visible = []
     for j in jobs:
+        # Cluster locks are FournosJobs too (spec.lockOnly) but they're
+        # surfaced separately via /cluster-locks (Schedules/Locks tab, the
+        # scheduling calendar's `locks` array) — without this they'd show
+        # up a second time here as if they were an ordinary running job.
+        if j.get("spec", {}).get("lockOnly"):
+            continue
+        # Likewise, a recurring *template* (spec.schedule set) isn't itself
+        # a run — it's surfaced in the Schedules/Locks tab's Recurring Jobs
+        # list. Its actual child runs (fournos.dev/recurring-parent label,
+        # no spec.schedule of their own) are real jobs and stay visible here.
+        if j.get("spec", {}).get("schedule"):
+            continue
         phase = j.get("status", {}).get("phase", "")
         if phase in ("Succeeded", "Failed", "Stopped"):
             conditions = j.get("status", {}).get("conditions", [])
@@ -216,20 +239,70 @@ async def _get_live_jobs() -> list:
     return await asyncio.to_thread(_get_live_jobs_sync)
 
 
-def _compute_current_steps_sync(jobs: list) -> dict:
-    steps = {}
-    for j in jobs:
-        phase = j.get("status", {}).get("phase", "")
-        if phase not in ("Running", "Admitted"):
-            continue
-        name = j.get("metadata", {}).get("name", "")
-        try:
-            step = k8s.get_current_step_for_job(name)
-            if step:
-                steps[name] = step
-        except Exception:
-            pass
-    return steps
+def _merge_pipeline_stages(pipeline_def: Optional[dict], actual_stages: list) -> list:
+    """Overlay real per-task status (from whatever TaskRuns Tekton has
+    created so far) onto a pipeline's full, predefined task order — so the
+    Pipeline Timeline shows every step a job *will* run, not just the ones
+    that happen to have started already. Falls back to `actual_stages`
+    as-is if the pipeline isn't one we have a definition for.
+    """
+    if not pipeline_def:
+        return actual_stages
+
+    actual_by_name = {s["name"]: s for s in actual_stages}
+
+    def _pending(name: str, is_finally: bool) -> dict:
+        return {
+            "name": name,
+            "displayName": name.replace("-", " ").title(),
+            "status": "Pending",
+            "startTime": None,
+            "completionTime": None,
+            "finally": is_finally,
+        }
+
+    merged = [
+        actual_by_name.get(name) or _pending(name, False)
+        for name in pipeline_def.get("tasks", [])
+    ]
+    merged += [
+        actual_by_name.get(name) or _pending(name, True)
+        for name in pipeline_def.get("finally", [])
+    ]
+
+    known = set(pipeline_def.get("tasks", [])) | set(pipeline_def.get("finally", []))
+    merged += [s for s in actual_stages if s["name"] not in known]
+    return merged
+
+
+def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
+    """Parse a UTC ISO-8601 timestamp (as sent by the frontend's
+    timezone.ts, always ending in "Z") into an aware datetime, or None."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        return None
+
+
+# Sortable-column keys shared by every jobs-table column header on the
+# frontend (Live Jobs + History use these; "date" and "duration" only make
+# sense for history, since a live job has no completed_at/duration yet —
+# see the fallback to created_at below).
+_LIVE_SORT_KEYS = {
+    "name": lambda s: (s.get("name") or "").lower(),
+    "project": lambda s: (s.get("project") or "").lower(),
+    "cluster": lambda s: (s.get("cluster") or "").lower(),
+    "status": lambda s: (s.get("status") or "").lower(),
+    "owner": lambda s: (s.get("owner") or "").lower(),
+    "date": lambda s: s.get("created_at") or "",
+    "age": lambda s: s.get("created_at") or "",
+    "triggered_by": lambda s: (s.get("triggered_by_schedule") or "").lower(),
+}
 
 
 # ─── routes: jobs ────────────────────────────────────────────────────────
@@ -241,6 +314,10 @@ async def list_jobs(
     cluster: str = Query(""),
     status: str = Query(""),
     owner: str = Query(""),
+    start_time: Optional[str] = Query(None, description="ISO 8601 UTC — history tab only"),
+    end_time: Optional[str] = Query(None, description="ISO 8601 UTC — history tab only"),
+    sort_by: str = Query(""),
+    sort_dir: str = Query("desc", regex="^(asc|desc)$"),
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=200),
 ):
@@ -266,11 +343,16 @@ async def list_jobs(
                 j for j in jobs
                 if j.get("spec", {}).get("owner") == owner
             ]
-        total = len(jobs)
-        offset = (page - 1) * per_page
-        jobs = jobs[offset: offset + per_page]
         summaries = [_live_job_to_summary(j) for j in jobs]
+        key_fn = _LIVE_SORT_KEYS.get(sort_by)
+        if key_fn:
+            summaries.sort(key=key_fn, reverse=(sort_dir == "desc"))
+        total = len(summaries)
+        offset = (page - 1) * per_page
+        summaries = summaries[offset: offset + per_page]
     else:
+        created_after = _parse_iso_utc(start_time)
+        created_before = _parse_iso_utc(end_time)
         async with AsyncSessionLocal() as session:
             db_jobs, total = await db_svc.list_jobs(
                 session,
@@ -278,6 +360,10 @@ async def list_jobs(
                 cluster=cluster or None,
                 status=status or None,
                 owner=owner or None,
+                created_after=created_after,
+                created_before=created_before,
+                sort_by=sort_by or None,
+                sort_dir=sort_dir,
                 limit=per_page,
                 offset=(page - 1) * per_page,
             )
@@ -329,6 +415,11 @@ async def get_job(job_name: str):
             stages = await asyncio.to_thread(
                 k8s.extract_pipeline_stages, pr
             )
+
+        pipeline_name = job.get("spec", {}).get("pipeline", "")
+        if pipeline_name:
+            pipeline_def = await pipeline_definitions.get_definition(pipeline_name)
+            stages = _merge_pipeline_stages(pipeline_def, stages)
 
         step = await asyncio.to_thread(
             k8s.get_current_step_for_job, job_name
@@ -495,6 +586,22 @@ async def stream_logs(job_name: str, pod_name: str):
 
 # ─── routes: submit ──────────────────────────────────────────────────────
 
+def _apply_scheduling(spec: dict, schedule: str, scheduled_start_time: Optional[str]) -> None:
+    """Set spec.schedule / spec.scheduledStartTime exactly as the FournosJob
+    CRD expects (see fournos/manifests/crd.yaml) — the two are mutually
+    exclusive on the CRD itself, so reject both being set here too rather
+    than let the operator silently pick one.
+    """
+    if schedule and scheduled_start_time:
+        raise HTTPException(
+            400, "schedule and scheduled_start_time are mutually exclusive"
+        )
+    if schedule:
+        spec["schedule"] = schedule
+    elif scheduled_start_time:
+        spec["scheduledStartTime"] = scheduled_start_time
+
+
 @router.post("/submit", response_model=SubmitJobResponse)
 async def submit_job(req: SubmitJobRequest, _=Depends(require_auth)):
     config_overrides = dict(req.config_overrides)
@@ -544,6 +651,7 @@ async def submit_job(req: SubmitJobRequest, _=Depends(require_auth)):
         }
     if secret_refs:
         spec["secretRefs"] = secret_refs
+    _apply_scheduling(spec, req.schedule, req.scheduled_start_time)
 
     body: dict[str, Any] = {
         "apiVersion": "{}/{}".format(
@@ -565,6 +673,9 @@ async def submit_job(req: SubmitJobRequest, _=Depends(require_auth)):
         raise HTTPException(500, "Failed to create FournosJob: {}".format(exc))
 
     created_name = created.get("metadata", {}).get("name", job_name)
+    initial_status = (
+        "Recurring" if req.schedule else "Scheduled" if req.scheduled_start_time else "Pending"
+    )
 
     try:
         async with AsyncSessionLocal() as session, session.begin():
@@ -576,9 +687,14 @@ async def submit_job(req: SubmitJobRequest, _=Depends(require_auth)):
                 cluster=req.cluster,
                 pipeline=req.pipeline,
                 owner=req.owner or "fournos-dashboard",
-                status="Pending",
+                status=initial_status,
                 config_overrides=config_overrides,
                 fjob_spec=body.get("spec", {}),
+                trigger_type=(
+                    "recurring-parent" if req.schedule
+                    else "deferred" if req.scheduled_start_time
+                    else "manual"
+                ),
             )
     except Exception as exc:
         logger.error(
@@ -643,6 +759,7 @@ async def submit_matrix(req: SubmitMatrixRequest, _=Depends(require_auth)):
                 "gpuType": req.gpu_type.strip() or "unknown",
                 "gpuCount": model_item.gpu_count or 1,
             }
+        _apply_scheduling(spec, req.schedule, req.scheduled_start_time)
 
         body: dict[str, Any] = {
             "apiVersion": "{}/{}".format(
@@ -677,9 +794,18 @@ async def submit_matrix(req: SubmitMatrixRequest, _=Depends(require_auth)):
                         cluster=req.cluster,
                         pipeline=req.pipeline,
                         owner=req.owner,
-                        status="Pending",
+                        status=(
+                            "Recurring" if req.schedule
+                            else "Scheduled" if req.scheduled_start_time
+                            else "Pending"
+                        ),
                         config_overrides=job_overrides,
                         fjob_spec=body.get("spec", {}),
+                        trigger_type=(
+                            "recurring-parent" if req.schedule
+                            else "deferred" if req.scheduled_start_time
+                            else "manual"
+                        ),
                     )
             except Exception as exc:
                 logger.error(
@@ -787,99 +913,226 @@ async def github_open_prs():
         raise HTTPException(502, "GitHub API error: {}".format(exc))
 
 
-# ─── routes: schedules ──────────────────────────────────────────────────
+# ─── routes: recurring jobs ──────────────────────────────────────────────
+#
+# Native Fournos recurring jobs — a FournosJob with spec.schedule set, kept
+# in "Recurring" phase by the operator as a template for child jobs (see
+# fournos/fournos/handlers/lifecycle.py). No separate CRD, no Control
+# Center-managed CronJobs — this reads/writes real FournosJob objects only.
 
-@router.get("/schedules", response_model=List[ScheduleResponse])
-async def list_schedules():
-    return await asyncio.to_thread(k8s.list_managed_cronjobs)
-
-
-@router.post("/schedules", response_model=ScheduleResponse)
-async def create_schedule(
-    req: CreateScheduleRequest, _=Depends(require_admin)
-):
-    try:
-        result = await asyncio.to_thread(
-            k8s.create_cronjob,
-            name=req.name,
-            schedule=req.cron_expr,
-            project=req.project,
-            cluster=req.cluster,
-            pipeline=req.pipeline,
-            preset=req.preset,
-            image=req.image_source,
-            owner=req.owner,
-            resolver_script=req.resolver_script.strip()
-            .replace("\r\n", "\n")
-            .replace("\r", "\n"),
-            resolver_image=req.resolver_image.strip(),
-            resolver_filename=req.resolver_filename.strip(),
-        )
-        return result
-    except Exception as exc:
-        raise HTTPException(500, str(exc))
+def _recurring_job_to_response(job: dict) -> dict:
+    meta = job.get("metadata", {})
+    spec = job.get("spec", {})
+    status = job.get("status", {})
+    forge = spec.get("executionEngine", {}).get("forge", {})
+    return {
+        "name": meta.get("name", ""),
+        "project": forge.get("project", ""),
+        "cluster": spec.get("cluster", ""),
+        "pipeline": spec.get("pipeline", ""),
+        "preset": " ".join(forge.get("args", [])),
+        "owner": spec.get("owner", ""),
+        "schedule": spec.get("schedule", ""),
+        "phase": status.get("phase", ""),
+        "message": status.get("message", ""),
+        "last_scheduled_time": status.get("lastScheduledTime"),
+        "created_at": meta.get("creationTimestamp", ""),
+    }
 
 
-@router.get("/schedules/{name}/runs")
-async def schedule_runs(name: str):
+@router.get("/recurring-jobs", response_model=List[RecurringJobResponse])
+async def list_recurring_jobs(cluster: str = Query("")):
+    jobs = await asyncio.to_thread(k8s.list_recurring_jobs)
+    if cluster:
+        jobs = [j for j in jobs if j.get("spec", {}).get("cluster") == cluster]
+    return [_recurring_job_to_response(j) for j in jobs]
+
+
+@router.get(
+    "/recurring-jobs/{name}/children",
+    response_model=List[ScheduleChildJobResponse],
+)
+async def recurring_job_children(name: str):
+    """Child jobs spawned by this recurring template, newest first.
+
+    Sourced from the Control Center's own DB (populated by the watcher from
+    the fournos.dev/recurring-parent label) — this is also what backs the
+    "Triggered By" link on the History tab and the click-through from the
+    Schedules tab.
+    """
     async with AsyncSessionLocal() as session:
         jobs = await db_svc.list_jobs_by_schedule(session, name)
-        return [
-            {
-                "name": j.name,
-                "status": j.status,
-                "preset": j.preset,
-                "trigger_type": j.trigger_type or "scheduled",
-                "duration_seconds": j.duration_seconds,
-                "mlflow_url": j.mlflow_url,
-                "created_at": (
-                    j.created_at.isoformat() if j.created_at else ""
-                ),
-            }
-            for j in jobs
-        ]
+    return [
+        {
+            "name": j.name,
+            "status": j.status,
+            "trigger_type": j.trigger_type or "recurring",
+            "duration_seconds": j.duration_seconds,
+            "mlflow_url": j.mlflow_url or "",
+            "created_at": j.created_at.isoformat() if j.created_at else "",
+        }
+        for j in jobs
+    ]
 
 
-@router.post("/schedules/{name}/toggle")
-async def toggle_schedule(name: str, _=Depends(require_admin)):
-    cj = await asyncio.to_thread(k8s.get_managed_cronjob, name)
-    if cj is None:
-        raise HTTPException(404, "Schedule not found")
-    await asyncio.to_thread(
-        k8s.patch_cronjob_suspend, name, not cj["suspend"]
-    )
-    return {"status": "ok"}
-
-
-@router.get("/schedules/{name}/resolver", response_model=ResolverScriptResponse)
-async def get_resolver_script_route(name: str):
-    cj = await asyncio.to_thread(k8s.get_managed_cronjob, name)
-    if cj is None:
-        raise HTTPException(404, "Schedule not found")
-    cm_name = cj.get("resolver_configmap", "")
-    if not cm_name:
-        raise HTTPException(404, "No resolver script configured")
-    filename, content = await asyncio.to_thread(
-        k8s.get_resolver_script, cm_name
-    )
-    if not content:
-        raise HTTPException(404, "Resolver ConfigMap not found")
-    return {"filename": filename, "content": content}
-
-
-@router.post("/schedules/{name}/trigger")
-async def trigger_schedule(name: str, _=Depends(require_admin)):
+@router.post("/recurring-jobs/{name}/trigger")
+async def trigger_recurring_job(name: str, _=Depends(require_admin)):
+    """Force an immediate off-cycle child run — annotates the parent job
+    with fournos.dev/trigger-now=true, exactly what `kubectl annotate` would
+    do; the operator picks it up on its next ~5s reconcile tick.
+    """
     try:
-        job = await asyncio.to_thread(k8s.trigger_cronjob, name)
-        return {"status": "ok", "job_name": job}
-    except Exception as exc:
-        raise HTTPException(500, str(exc))
-
-
-@router.delete("/schedules/{name}")
-async def delete_schedule(name: str, _=Depends(require_admin)):
-    try:
-        await asyncio.to_thread(k8s.delete_cronjob, name)
+        await asyncio.to_thread(k8s.trigger_recurring_now, name)
         return {"status": "ok"}
     except Exception as exc:
         raise HTTPException(500, str(exc))
+
+
+@router.delete("/recurring-jobs/{name}")
+async def delete_recurring_job(name: str, _=Depends(require_admin)):
+    try:
+        await asyncio.to_thread(k8s.delete_fournos_job, name)
+        return {"status": "ok"}
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+# ─── routes: cluster locks ───────────────────────────────────────────────
+#
+# Also not a separate resource — a FournosJob with spec.lockOnly (or a bare
+# spec.lockUntil) holds the cluster's full Kueue quota without running a
+# pipeline (see fournos/fournos/handlers/execution.py::is_lock_only).
+
+def _cluster_lock_to_response(job: dict) -> dict:
+    meta = job.get("metadata", {})
+    spec = job.get("spec", {})
+    status = job.get("status", {})
+    return {
+        "name": meta.get("name", ""),
+        "cluster": spec.get("cluster", ""),
+        "owner": spec.get("owner", ""),
+        "reason": spec.get("displayName", ""),
+        "phase": status.get("phase", ""),
+        "lock_until": spec.get("lockUntil"),
+        "scheduled_start_time": spec.get("scheduledStartTime"),
+        "created_at": meta.get("creationTimestamp", ""),
+    }
+
+
+@router.get("/cluster-locks", response_model=List[ClusterLockResponse])
+async def list_cluster_locks(cluster: str = Query("")):
+    locks = await asyncio.to_thread(k8s.list_cluster_locks, None, cluster or None)
+    return [_cluster_lock_to_response(j) for j in locks]
+
+
+@router.post("/cluster-locks", response_model=ClusterLockResponse)
+async def create_cluster_lock(
+    req: CreateClusterLockRequest, _=Depends(require_auth)
+):
+    spec: dict[str, Any] = {
+        "cluster": req.cluster,
+        "displayName": req.reason or "Cluster lock",
+        "owner": req.owner or "fournos-dashboard",
+        "exclusive": True,
+        "lockOnly": True,
+    }
+    if req.lock_until:
+        spec["lockUntil"] = req.lock_until
+    if req.scheduled_start_time:
+        spec["scheduledStartTime"] = req.scheduled_start_time
+
+    job_name = k8s.sanitize_job_name("lock-{}".format(req.cluster))
+    body = {
+        "apiVersion": "{}/{}".format(
+            settings.FOURNOS_API_GROUP, settings.FOURNOS_API_VERSION
+        ),
+        "kind": "FournosJob",
+        "metadata": {"name": job_name, "namespace": settings.FOURNOS_NAMESPACE},
+        "spec": spec,
+    }
+    try:
+        created = await asyncio.to_thread(k8s.create_fournos_job, body)
+    except Exception as exc:
+        raise HTTPException(500, "Failed to create cluster lock: {}".format(exc))
+    return _cluster_lock_to_response(created)
+
+
+@router.delete("/cluster-locks/{name}")
+async def delete_cluster_lock(name: str, _=Depends(require_admin)):
+    try:
+        await asyncio.to_thread(k8s.delete_fournos_job, name)
+        return {"status": "ok"}
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+# ─── routes: per-cluster overview ────────────────────────────────────────
+
+@router.get("/clusters/{cluster}/overview", response_model=ClusterOverviewResponse)
+async def cluster_overview(cluster: str):
+    """Backs the "Defer / Recurring / Lock cluster" popup on the Submit
+    page: what's running on this cluster now, what recurs on it, and what
+    locks (active or scheduled) it has — all live from the fournos
+    namespace, so it's always consistent with the Live Jobs and Schedules
+    tabs.
+    """
+    all_jobs = await _get_live_jobs()
+    current = [
+        j for j in all_jobs if j.get("spec", {}).get("cluster") == cluster
+    ]
+    recurring = await asyncio.to_thread(k8s.list_recurring_jobs)
+    recurring = [j for j in recurring if j.get("spec", {}).get("cluster") == cluster]
+    locks = await asyncio.to_thread(k8s.list_cluster_locks, None, cluster)
+
+    return {
+        "cluster": cluster,
+        "current_jobs": [_live_job_to_summary(j) for j in current],
+        "recurring_jobs": [_recurring_job_to_response(j) for j in recurring],
+        "locks": [_cluster_lock_to_response(j) for j in locks],
+    }
+
+
+# ─── routes: calendar slot holds ─────────────────────────────────────────
+#
+# Ephemeral "someone else is booking this slot right now" markers for the
+# scheduling calendar — see slot_hold_service.py. Not a Fournos concept, so
+# there's nothing to reconcile with the live cluster state here.
+
+def _slot_hold_to_response(hold) -> dict:
+    return {
+        "cluster": hold.cluster,
+        "start_time": hold.start_time,
+        "held_by": hold.held_by,
+        "expires_at": hold.expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+@router.get("/clusters/{cluster}/slot-holds", response_model=List[SlotHoldResponse])
+async def list_slot_holds(cluster: str):
+    return [_slot_hold_to_response(h) for h in slot_holds.list_holds(cluster)]
+
+
+@router.post("/clusters/{cluster}/slot-holds", response_model=SlotHoldResponse)
+async def create_slot_hold(cluster: str, req: HoldSlotRequest, user=Depends(require_auth)):
+    """Claim (or refresh, if you already hold it) a calendar slot. 409s if
+    someone else is actively booking the same slot right now.
+    """
+    try:
+        hold = slot_holds.hold_slot(cluster, req.start_time, user["username"])
+    except slot_holds.SlotAlreadyHeldError as exc:
+        raise HTTPException(
+            409,
+            f"This time slot is currently being booked by {exc.hold.held_by}. "
+            "Try another slot or wait a moment.",
+        )
+    return _slot_hold_to_response(hold)
+
+
+@router.delete("/clusters/{cluster}/slot-holds")
+async def release_slot_hold(
+    cluster: str, start_time: str = Query(...), user=Depends(require_auth)
+):
+    slot_holds.release_slot(
+        cluster, start_time, user["username"], force=user["role"] == "admin"
+    )
+    return {"status": "ok"}

@@ -86,6 +86,22 @@ class UiVisibleIf(BaseModel):
     one_of: Optional[List[Any]] = None
 
 
+class UiOptionRestriction(BaseModel):
+    """Drop some of this field's own options whenever another field
+    currently has a matching value — e.g. a hardware/engine compatibility
+    constraint like "accelerator can't be amd once engine == trt-llm".
+
+    Applies uniformly no matter how this field's `options` were populated
+    (literal `options:`, `options_ref`, or a `presets_ref` pool), since by
+    resolution time they're all just a flat `UiOption` list. If the field's
+    currently-selected value is excluded by a matching rule, the frontend
+    clears the selection so the user re-picks a still-valid option.
+    """
+
+    when: UiVisibleIf
+    exclude_values: List[str] = Field(default_factory=list)
+
+
 class UiField(BaseModel):
     """One form field. Only declare fields that are specific to this
     project — cluster, pipeline, owner, priority, exclusive, and the PR
@@ -115,6 +131,7 @@ class UiField(BaseModel):
     options: List[UiOption] = Field(default_factory=list)
     options_ref: Optional[UiOptionsRef] = None
     visible_if: Optional[UiVisibleIf] = None
+    restrict_if: List[UiOptionRestriction] = Field(default_factory=list)
     min: Optional[float] = None
     max: Optional[float] = None
 

@@ -104,6 +104,7 @@ Field properties:
 | `options`     | Static inline options (mutually exclusive with `options_ref`, or additive to whatever `presets_ref` partitioning already produced). |
 | `options_ref` | Dynamically source options from another file in this project — see below. |
 | `visible_if`  | `{field, equals}` or `{field, one_of}` — conditional visibility.        |
+| `restrict_if` | List of `{when: {field, equals\|one_of}, exclude_values: [...]}` — drop some of *this* field's own options when another field currently matches. |
 | `min` / `max` | For `type: number`.                                                     |
 
 Only declare fields that are specific to this project. Cluster, pipeline,
@@ -162,6 +163,51 @@ already has options:
    `model` field gets a human-readable name from `config.d/models.yaml`
    even though its options were produced from `presets.d`.
 
+## Cross-field compatibility constraints: `restrict_if`
+
+`visible_if` hides/shows a whole field. `restrict_if` is the narrower
+sibling: it drops *some* of a field's own options — whatever their
+source (`options`, `options_ref`, or a shared `presets_ref` pool) — while
+another field currently has a matching value. Use it for real
+hardware/software compatibility constraints, e.g. an engine that doesn't
+support one of the accelerators:
+
+```yaml
+- key: accelerator
+  label: Accelerator
+  type: radio
+  required: true
+  maps_to: rhaiis.accelerator
+  restrict_if:
+    - when: {field: engine, equals: trtllm}
+      exclude_values: [amd]
+```
+
+Each rule's `when` takes the same shape as `visible_if` (`{field, equals}`
+or `{field, one_of}`). Multiple rules may target the same field; every
+matching rule's `exclude_values` are unioned. If the field's
+currently-selected value is excluded by a newly-matching rule (e.g. the
+user just switched `engine` to `trtllm` while `accelerator: amd` was
+already selected), the frontend clears that field's selection so a stale,
+now-invalid combination is never submitted.
+
+A real compatibility constraint is symmetric, so declare it on **both**
+fields, each referencing the other — `restrict_if` only prunes the field
+it's declared on, it doesn't infer the reverse direction automatically:
+
+```yaml
+- key: accelerator
+  ...
+  restrict_if:
+    - when: {field: engine, equals: trtllm}
+      exclude_values: [amd]
+- key: engine
+  ...
+  restrict_if:
+    - when: {field: accelerator, equals: amd}
+      exclude_values: [trtllm]
+```
+
 ## Sourcing a *shared* pool of self-tagged presets: `presets_ref`
 
 Some projects (RHAIIS) keep every dimension's presets mixed together in the
@@ -194,10 +240,16 @@ once (a compound/"quick" preset) is instead promoted to `mode.quick_presets`
 each project's declared `maps_to` values. No Python code changes are needed
 to onboard a new project with this convention — only the YAML.
 
-Note: when using `presets_ref` this way, `maps_to` on an *arg field* is only
-used for **partitioning** — the field still behaves as an arg field on
-submit (the selected preset's own key is pushed as an arg), it does **not**
-also write to `config_overrides`.
+Note: `maps_to` here doubles as the partitioning key *and* as the normal
+override-field behavior described above — the selected preset's own key
+(e.g. `nvidia`) is written directly to `config_overrides[maps_to]` (e.g.
+`rhaiis.accelerator: nvidia`), it is **not** additionally pushed to `args`.
+For every preset RHAIIS currently defines this way (accelerator, engine,
+model, workload are each single-key presets), that's functionally
+identical to what Forge's own resolution of that preset key would do. If a
+future preset partitioned this way ever needs to set more than the one
+`maps_to` key, promote it to a real `options_ref`-only arg field (no
+`maps_to`) instead so Forge resolves it in full.
 
 ### Quick presets
 
@@ -319,6 +371,6 @@ modes:
             placeholder: main
 ```
 
-See `docs/examples/ui-schema/` for full drafts against real project data
-(`rhaiis`, `llm_d`, `mcp_gateway`, `skeleton`), validated by running the
-actual resolver against the live Forge repo.
+Each project publishes its own `ui/submit.yaml` at the root of its
+directory in the Forge repo (e.g. `projects/rhaiis/ui/submit.yaml`); the
+Control Center fetches it directly from GitHub at request time.

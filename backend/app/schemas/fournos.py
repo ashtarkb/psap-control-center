@@ -25,6 +25,10 @@ class FournosJobSummary(BaseModel):
     mlflow_url: str = ""
     trigger_type: str = "manual"
     triggered_by_schedule: Optional[str] = None
+    # When set (deferred one-off jobs only), the actual planned start —
+    # distinct from created_at, which is just when the CR object was
+    # created. Powers the cluster calendar's day view.
+    scheduled_start_time: Optional[str] = None
     source: str = "live"
 
     class Config:
@@ -131,6 +135,11 @@ class SubmitJobRequest(BaseModel):
     priority: str = "manual"
     gpu_type: str = ""
     gpu_count: int = 1
+    # Scheduling — mirrors FournosJob's own spec.schedule / scheduledStartTime
+    # (see fournos/manifests/crd.yaml) exactly; the Control Center is just a
+    # UTC-converting UI on top, mutually exclusive same as the CRD itself.
+    scheduled_start_time: Optional[str] = None
+    schedule: str = ""
 
 
 class SubmitJobResponse(BaseModel):
@@ -167,6 +176,8 @@ class SubmitMatrixRequest(BaseModel):
     exclusive: bool = False
     pull_sha: str = ""
     gpu_type: str = ""
+    scheduled_start_time: Optional[str] = None
+    schedule: str = ""
 
 
 class SubmitMatrixResultItem(BaseModel):
@@ -182,44 +193,94 @@ class SubmitMatrixResponse(BaseModel):
     total: int
 
 
-# -- Schedule schemas --
+# -- Recurring jobs --
+#
+# A "recurring job" is not a separate resource — it's a FournosJob whose
+# spec.schedule is set, which the operator keeps in "Recurring" phase and
+# uses as a template to stamp out child FournosJobs on each cron tick (see
+# fournos/fournos/handlers/lifecycle.py). Children carry the
+# fournos.dev/recurring-parent label pointing back at this job's name.
 
-class ScheduleResponse(BaseModel):
+class RecurringJobResponse(BaseModel):
     name: str
-    namespace: str = ""
-    schedule: str
-    suspend: bool = False
     project: str = ""
     cluster: str = ""
     pipeline: str = ""
     preset: str = ""
     owner: str = ""
-    has_resolver: bool = False
-    resolver_configmap: str = ""
-    resolver_image: str = ""
-    resolver_filename: str = ""
+    schedule: str = ""  # cron expression, UTC
+    phase: str = ""
+    message: str = ""
+    last_scheduled_time: Optional[str] = None
     created_at: str = ""
-    last_schedule: str = ""
-    active_count: int = 0
 
 
-class CreateScheduleRequest(BaseModel):
+class ScheduleChildJobResponse(BaseModel):
     name: str
-    project: str
-    cluster: str
-    pipeline: str = "forge-test-only"
-    preset: str = ""
-    cron_expr: str
-    image_source: str = ""
+    status: str = "Pending"
+    trigger_type: str = "recurring"
+    duration_seconds: Optional[float] = None
+    mlflow_url: str = ""
+    created_at: str = ""
+
+
+# -- Cluster locks --
+#
+# Also not a separate resource — a FournosJob with spec.lockOnly (or a bare
+# spec.lockUntil) is a sentinel that holds the cluster's exclusive Kueue
+# quota without running a pipeline (see fournos/fournos/handlers/
+# execution.py::is_lock_only). Can be scheduled to start later via the same
+# spec.scheduledStartTime every other FournosJob supports.
+
+class ClusterLockResponse(BaseModel):
+    name: str
+    cluster: str = ""
     owner: str = ""
-    resolver_script: str = ""
-    resolver_image: str = ""
-    resolver_filename: str = ""
+    reason: str = ""
+    phase: str = ""
+    lock_until: Optional[str] = None
+    scheduled_start_time: Optional[str] = None
+    created_at: str = ""
 
 
-class ResolverScriptResponse(BaseModel):
-    filename: str
-    content: str
+class CreateClusterLockRequest(BaseModel):
+    cluster: str
+    owner: str = ""
+    reason: str = ""
+    lock_until: Optional[str] = None  # ISO 8601 UTC; omit = held indefinitely
+    scheduled_start_time: Optional[str] = None  # ISO 8601 UTC; omit = now
+
+
+class ClusterOverviewResponse(BaseModel):
+    """Combined per-cluster view backing the "Defer / Recurring / Lock"
+    popup on the Submit page: what's running now, what recurs, and what's
+    locked (now or scheduled for later) — all sourced live from the fournos
+    namespace, the same data the Schedules tab and Live Jobs tab use.
+    """
+
+    cluster: str
+    current_jobs: List[FournosJobSummary] = Field(default_factory=list)
+    recurring_jobs: List[RecurringJobResponse] = Field(default_factory=list)
+    locks: List[ClusterLockResponse] = Field(default_factory=list)
+
+
+# -- Calendar slot holds --
+#
+# Purely a Control Center UX nicety, not a Fournos concept: a short-lived,
+# in-memory claim on a (cluster, start_time) slot in the scheduling
+# calendar so two users can't both be mid-way through booking the exact
+# same slot at once. Fournos itself is happy to queue multiple jobs
+# targeting the same cluster/time regardless — see slot_hold_service.py.
+
+class SlotHoldResponse(BaseModel):
+    cluster: str
+    start_time: str  # ISO 8601 UTC, truncated to the slot granularity
+    held_by: str
+    expires_at: str
+
+
+class HoldSlotRequest(BaseModel):
+    start_time: str  # ISO 8601 UTC
 
 
 # -- Project info --

@@ -5,12 +5,12 @@
 # to control which projects show up in the "Project" dropdown, without a
 # code change or redeploy.
 #
-# `rhaiis` is special-cased by the backend/frontend: when it is selected,
-# the Submit Job page swaps in a dedicated RHAIIS form (accelerator/engine/
-# cluster/model/workload pickers + CPT pipeline support) instead of the
-# generic preset-based form. Its own configuration (presets, models,
-# clusters, CPT pipelines) is fetched live from the Forge GitHub repo, so
-# no config_keys/presets are needed for it here — just list it so it
+# `rhaiis` is handled the same way as every other project: if it publishes
+# a `projects/rhaiis/ui/submit.yaml` in the Forge repo, the Submit Job page
+# renders it as a fully dynamic form (accelerator/engine/cluster/model/
+# workload pickers, CPT pipeline support, etc.) driven entirely by that
+# file — see docs/ui-schema-spec.md. No config_keys/presets are needed for
+# it here since its schema is fetched live from Forge; just list it so it
 # appears as a selectable project.
 projects:
   - name: rhaiis
