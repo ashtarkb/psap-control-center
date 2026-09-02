@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import urllib.error
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 
 from app.core.config import settings
+from app.services.github_content import fetch_yaml, list_dirs, list_yamls, path_exists
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +61,20 @@ def discover_projects(force_refresh: bool = False) -> List[ProjectInfo]:
 
     result: Dict[str, ProjectInfo] = {}
 
+    # Local Forge checkout (dev convenience, e.g. FORGE_REPO_PATH pointing
+    # at a cloned repo mounted into the container) takes priority if set.
     projects_dir = _forge_projects_dir()
     if projects_dir is not None:
         result = _discover_from_repo(projects_dir)
 
+    # Production default: list `projects/` straight from the Forge GitHub
+    # repo, so nothing needs to be manually kept in sync — same mechanism
+    # already used to fetch each project's ui/submit.yaml.
+    if not result:
+        result = _discover_from_github()
+
+    # Last-resort manual override (e.g. GitHub is unreachable from this
+    # cluster's network) via a mounted ConfigMap.
     if not result:
         result = _discover_from_configmap()
 
@@ -102,6 +114,83 @@ def _discover_from_repo(projects_dir: Path) -> Dict[str, ProjectInfo]:
         )
 
     return result
+
+
+def _discover_from_github() -> Dict[str, ProjectInfo]:
+    skip = {"core", "__pycache__"}
+    try:
+        names = list_dirs("projects")
+    except Exception as exc:
+        logger.warning("Failed to list Forge projects from GitHub: %s", exc)
+        return {}
+
+    result: Dict[str, ProjectInfo] = {}
+    for name in names:
+        if name.startswith(".") or name in skip:
+            continue
+        if not _has_orchestration_dir(name):
+            continue
+        presets, config_keys, has_cli = _load_project_metadata_from_github(name)
+        result[name] = ProjectInfo(
+            name=name,
+            presets=presets,
+            config_keys=config_keys,
+            has_cli=has_cli,
+        )
+
+    return result
+
+
+def _has_orchestration_dir(name: str) -> bool:
+    """Whether `projects/<name>/orchestration` exists in the Forge repo.
+
+    Fails *open* (assumes it exists) on anything other than a confirmed
+    404 — a transient GitHub API error (rate limit, timeout, ...) should
+    not silently drop a real project from the list. A clean 404 is the
+    only case that actually excludes it.
+    """
+    try:
+        return path_exists("projects/{}/orchestration".format(name))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return False
+        logger.warning("Could not check projects/%s/orchestration: %s", name, exc)
+        return True
+    except Exception as exc:
+        logger.warning("Could not check projects/%s/orchestration: %s", name, exc)
+        return True
+
+
+def _load_project_metadata_from_github(name: str) -> Tuple[List[str], List[str], bool]:
+    """Best-effort enrichment for the legacy generic preset form (used as
+    a fallback for projects that haven't published a ui/submit.yaml yet).
+    Each lookup is independently swallowed on failure — a project should
+    still show up in the dropdown even if, say, it has no presets.d.
+    """
+    base = "projects/{}/orchestration".format(name)
+
+    presets: List[str] = []
+    try:
+        for preset_file in list_yamls("{}/presets.d".format(base)):
+            data = fetch_yaml(preset_file)
+            if isinstance(data, dict):
+                presets.extend(data.keys())
+    except Exception:
+        pass
+
+    config_keys: List[str] = []
+    try:
+        for cfg_file in list_yamls("{}/config.d".format(base)):
+            config_keys.append(Path(cfg_file).stem)
+    except Exception:
+        pass
+
+    try:
+        has_cli = path_exists("{}/cli.py".format(base))
+    except Exception:
+        has_cli = False
+
+    return presets, config_keys, has_cli
 
 
 def _discover_from_configmap() -> Dict[str, ProjectInfo]:

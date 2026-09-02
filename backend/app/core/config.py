@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     BILLING_CSV_STORAGE_PATH: str = "./billing_csvs"
 
     # Fournos Testing Tab
-    FOURNOS_NAMESPACE: str = "fournos-jobs"
+    FOURNOS_NAMESPACE: str = "psap-automation"
     FOURNOS_API_GROUP: str = "fournos.dev"
     FOURNOS_API_VERSION: str = "v1"
     FOURNOS_JOB_PLURAL: str = "fournosjobs"
