@@ -259,7 +259,22 @@ export function useGithubPRs() {
   return useQuery<GitHubPR[]>({
     queryKey: ['github-prs'],
     queryFn: () => fournosApi.getGithubPRs(),
-    staleTime: 60 * 1000,
+    // Server caches this indefinitely (fetched from GitHub once, reused for
+    // everyone) — mirror that here so we don't refetch on every mount/focus.
+    // Use useRefreshGithubPRs() to force a real refresh from GitHub.
+    staleTime: Infinity,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+  })
+}
+
+export function useRefreshGithubPRs() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => fournosApi.getGithubPRs(true),
+    onSuccess: (data) => {
+      queryClient.setQueryData(['github-prs'], data)
+    },
   })
 }
 

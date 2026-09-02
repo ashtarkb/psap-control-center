@@ -50,6 +50,7 @@ import {
   useDeleteClusterLock,
   useCreateClusterLock,
   useGithubPRs,
+  useRefreshGithubPRs,
   useProjectUiSchema,
   useRefreshProjectUiSchema,
   useClusterOverview,
@@ -368,6 +369,7 @@ function SubmitForm({ onSubmitted }: { onSubmitted?: (name: string) => void }) {
   const { data: projects } = useForgeProjects()
   const { data: pipelines } = usePipelines()
   const { data: githubPRs } = useGithubPRs()
+  const refreshGithubPRs = useRefreshGithubPRs()
   const submitJob = useSubmitJob()
 
   // "Basics" — common to every project, owned here so there is exactly one
@@ -796,7 +798,19 @@ function SubmitForm({ onSubmitted }: { onSubmitted?: (name: string) => void }) {
 
           {/* Pull Request picker */}
           <div className="relative">
-            <label className="block text-sm font-medium text-gray-700">Pull Request (optional)</label>
+            <div className="flex items-center justify-between">
+              <label className="block text-sm font-medium text-gray-700">Pull Request (optional)</label>
+              <button
+                type="button"
+                onClick={() => refreshGithubPRs.mutate()}
+                disabled={refreshGithubPRs.isPending}
+                className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
+                title="Re-fetch open PRs from GitHub"
+              >
+                <ArrowPathIcon className={clsx('h-3.5 w-3.5', refreshGithubPRs.isPending && 'animate-spin')} />
+                Refresh
+              </button>
+            </div>
             <input
               type="text"
               value={prSearch}

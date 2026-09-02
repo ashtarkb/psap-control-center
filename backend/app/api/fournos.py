@@ -880,6 +880,14 @@ async def list_pipelines():
 
 
 # ─── routes: GitHub PRs ─────────────────────────────────────────────────
+#
+# Cached server-side (like Forge project discovery) so the open-PR list is
+# fetched from GitHub once and reused for every user/poll, rather than on
+# every request — GitHub's unauthenticated rate limit (60/hr per source IP)
+# is shared across the whole deployment, not per-user.
+
+_open_prs_cache: Optional[list] = None
+
 
 def _fetch_github_open_prs_sync() -> list:
     url = (
@@ -906,11 +914,22 @@ def _fetch_github_open_prs_sync() -> list:
 
 
 @router.get("/github/open-prs", response_model=List[GitHubPR])
-async def github_open_prs():
+async def github_open_prs(refresh: bool = False):
+    global _open_prs_cache
+    if _open_prs_cache is not None and not refresh:
+        return _open_prs_cache
+
     try:
-        return await asyncio.to_thread(_fetch_github_open_prs_sync)
+        prs = await asyncio.to_thread(_fetch_github_open_prs_sync)
     except Exception as exc:
+        if _open_prs_cache is not None:
+            # Serve the last known-good list rather than erroring out (and
+            # don't let a transient failure clobber a good cache).
+            return _open_prs_cache
         raise HTTPException(502, "GitHub API error: {}".format(exc))
+
+    _open_prs_cache = prs
+    return prs
 
 
 # ─── routes: recurring jobs ──────────────────────────────────────────────
