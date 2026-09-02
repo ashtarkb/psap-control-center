@@ -407,6 +407,10 @@ export const fournosApi = {
     cluster?: string
     status?: string
     owner?: string
+    start_time?: string
+    end_time?: string
+    sort_by?: string
+    sort_dir?: 'asc' | 'desc'
     page?: number
     per_page?: number
   } = {}) => {
@@ -454,48 +458,89 @@ export const fournosApi = {
     return data
   },
 
+  getProjectUiSchema: async (name: string) => {
+    const { data } = await api.get(`/fournos/projects/${name}/ui-schema`)
+    return data
+  },
+
+  refreshProjectUiSchema: async (name: string) => {
+    const { data } = await api.post(`/fournos/projects/${name}/ui-schema/refresh`)
+    return data
+  },
+
   listPipelines: async () => {
     const { data } = await api.get('/fournos/pipelines')
     return data
   },
 
-  listSchedules: async () => {
-    const { data } = await api.get('/fournos/schedules')
+  // ─── Recurring jobs (native FournosJob spec.schedule) ─────────────────
+
+  listRecurringJobs: async (cluster?: string) => {
+    const { data } = await api.get('/fournos/recurring-jobs', { params: cluster ? { cluster } : undefined })
     return data
   },
 
-  createSchedule: async (req: import('../types').CreateScheduleRequest) => {
-    const { data } = await api.post('/fournos/schedules', req)
+  getRecurringJobChildren: async (name: string) => {
+    const { data } = await api.get(`/fournos/recurring-jobs/${name}/children`)
     return data
   },
 
-  getScheduleRuns: async (name: string) => {
-    const { data } = await api.get(`/fournos/schedules/${name}/runs`)
+  triggerRecurringJob: async (name: string) => {
+    const { data } = await api.post(`/fournos/recurring-jobs/${name}/trigger`)
     return data
   },
 
-  toggleSchedule: async (name: string) => {
-    const { data } = await api.post(`/fournos/schedules/${name}/toggle`)
+  deleteRecurringJob: async (name: string) => {
+    const { data } = await api.delete(`/fournos/recurring-jobs/${name}`)
     return data
   },
 
-  triggerSchedule: async (name: string) => {
-    const { data } = await api.post(`/fournos/schedules/${name}/trigger`)
+  // ─── Cluster locks (native FournosJob spec.lockOnly) ───────────────────
+
+  listClusterLocks: async (cluster?: string) => {
+    const { data } = await api.get('/fournos/cluster-locks', { params: cluster ? { cluster } : undefined })
     return data
   },
 
-  deleteSchedule: async (name: string) => {
-    const { data } = await api.delete(`/fournos/schedules/${name}`)
+  createClusterLock: async (req: import('../types').CreateClusterLockRequest) => {
+    const { data } = await api.post('/fournos/cluster-locks', req)
     return data
   },
 
-  getResolverScript: async (name: string) => {
-    const { data } = await api.get(`/fournos/schedules/${name}/resolver`)
+  deleteClusterLock: async (name: string) => {
+    const { data } = await api.delete(`/fournos/cluster-locks/${name}`)
+    return data
+  },
+
+  getClusterOverview: async (cluster: string) => {
+    const { data } = await api.get(`/fournos/clusters/${cluster}/overview`)
+    return data
+  },
+
+  // ─── Calendar slot holds (ephemeral, UX-only anti-race claim) ─────────
+
+  listSlotHolds: async (cluster: string) => {
+    const { data } = await api.get(`/fournos/clusters/${cluster}/slot-holds`)
+    return data
+  },
+
+  holdSlot: async (cluster: string, startTime: string) => {
+    const { data } = await api.post(`/fournos/clusters/${cluster}/slot-holds`, { start_time: startTime })
+    return data
+  },
+
+  releaseSlot: async (cluster: string, startTime: string) => {
+    const { data } = await api.delete(`/fournos/clusters/${cluster}/slot-holds`, { params: { start_time: startTime } })
     return data
   },
 
   getGithubPRs: async () => {
     const { data } = await api.get('/fournos/github/open-prs')
+    return data
+  },
+
+  submitMatrix: async (req: import('../types').SubmitMatrixRequest) => {
+    const { data } = await api.post('/fournos/submit-matrix', req)
     return data
   },
 }

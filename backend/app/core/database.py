@@ -73,6 +73,7 @@ _MIGRATIONS = [
     ("clusters", "provider", "VARCHAR(20) NOT NULL DEFAULT 'ibm'"),
     ("clusters", "infra_id", "VARCHAR(100)"),
     ("instance_type_rates", "is_estimated", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    ("fournos_jobs", "is_lock", "BOOLEAN NOT NULL DEFAULT FALSE"),
 ]
 
 

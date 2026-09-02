@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import (
-    Column, DateTime, Float, ForeignKey, String, Text, Index,
+    Boolean, Column, DateTime, Float, ForeignKey, String, Text, Index,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import relationship
@@ -41,6 +41,11 @@ class FournosJob(Base):
     error_message = Column(Text, default="")
     triggered_by_schedule = Column(String(255), nullable=True, index=True)
     trigger_type = Column(String(50), default="manual")
+    # A cluster lock is just a FournosJob with spec.lockOnly=True — tracked
+    # explicitly (rather than inferred from name/trigger_type, both of which
+    # can collide with real deferred jobs) so the History tab can exclude
+    # locks the same way it excludes recurring-parent templates.
+    is_lock = Column(Boolean, default=False, index=True)
 
     events = relationship(
         "FournosJobEvent",

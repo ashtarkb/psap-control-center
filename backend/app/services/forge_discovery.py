@@ -31,6 +31,18 @@ class ProjectInfo:
 
 _cache: Optional[Dict[str, ProjectInfo]] = None
 
+# Forge projects that exist but shouldn't show up as selectable in the
+# Control Center's Testing UI (internal tooling, deprecated, etc). This is
+# an explicit blocklist, not a whitelist — anything new added to Forge
+# still shows up automatically unless it's named here.
+EXCLUDED_PROJECTS = {
+    "caliper",
+    "foreign_testing",
+    "fournos_launcher",
+    "jump_ci",
+    "llm_d_legacy",
+}
+
 
 def _forge_projects_dir() -> Optional[Path]:
     if settings.FORGE_REPO_PATH:
@@ -53,6 +65,9 @@ def discover_projects(force_refresh: bool = False) -> List[ProjectInfo]:
 
     if not result:
         result = _discover_from_configmap()
+
+    for name in EXCLUDED_PROJECTS:
+        result.pop(name, None)
 
     _cache = result
     logger.info("Discovered %d Forge projects", len(result))
@@ -128,11 +143,6 @@ def _discover_from_configmap() -> Dict[str, ProjectInfo]:
 def get_project(name: str) -> Optional[ProjectInfo]:
     projects = discover_projects()
     return next((p for p in projects if p.name == name), None)
-
-
-def get_project_presets(name: str) -> List[str]:
-    proj = get_project(name)
-    return proj.presets if proj else []
 
 
 def _load_presets(orchestration_dir: Path) -> List[str]:

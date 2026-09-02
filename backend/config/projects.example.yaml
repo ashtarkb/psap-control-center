@@ -1,0 +1,24 @@
+# Example Forge project list for the Testing tab's Submit Job page.
+#
+# Mount this file (or a ConfigMap containing it) at the path configured by
+# FORGE_PROJECTS_CONFIG_PATH (default: /etc/fournos-dashboard/projects.yaml)
+# to control which projects show up in the "Project" dropdown, without a
+# code change or redeploy.
+#
+# `rhaiis` is handled the same way as every other project: if it publishes
+# a `projects/rhaiis/ui/submit.yaml` in the Forge repo, the Submit Job page
+# renders it as a fully dynamic form (accelerator/engine/cluster/model/
+# workload pickers, CPT pipeline support, etc.) driven entirely by that
+# file — see docs/ui-schema-spec.md. No config_keys/presets are needed for
+# it here since its schema is fetched live from Forge; just list it so it
+# appears as a selectable project.
+projects:
+  - name: rhaiis
+    cluster: ""
+    presets: []
+  - name: example-project
+    cluster: my-cluster
+    presets:
+      - smoke
+      - nightly
+      - default

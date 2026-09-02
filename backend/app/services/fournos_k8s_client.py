@@ -1,4 +1,4 @@
-"""Kubernetes client for FournosJob, PipelineRun, Pod, and CronJob operations.
+"""Kubernetes client for FournosJob, PipelineRun, and Pod operations.
 
 Ported from fournos-ui k8s_client.py — adapted for PSAP Control Center's
 async FastAPI backend. Reuses the Hearth kubeconfig when available.
@@ -6,14 +6,13 @@ async FastAPI backend. Reuses the Hearth kubeconfig when available.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 import threading
 from collections.abc import Generator
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 from kubernetes import client, config, watch
 from kubernetes.client.rest import ApiException
@@ -25,12 +24,13 @@ logger = logging.getLogger(__name__)
 _api_client: Optional[client.ApiClient] = None
 _custom_api: Optional[client.CustomObjectsApi] = None
 _core_api: Optional[client.CoreV1Api] = None
-_batch_api: Optional[client.BatchV1Api] = None
 _lock = threading.Lock()
 
-SCHEDULE_LABEL = "fournos-launcher/managed-by"
-SCHEDULE_LABEL_VALUE = "fournos-dashboard"
-PROJECT_LABEL = "fournos-launcher/project"
+# Native Fournos recurring-job / trigger-now constants — mirrors
+# fournos/fournos/core/constants.py exactly, so the Control Center speaks
+# the operator's own vocabulary instead of a bespoke scheduling mechanism.
+LABEL_RECURRING_PARENT = "fournos.dev/recurring-parent"
+ANNOTATION_TRIGGER_NOW = "fournos.dev/trigger-now"
 
 HEARTH_KUBECONFIG_FILENAME = "hearth-management.kubeconfig"
 
@@ -43,7 +43,7 @@ def _saved_hearth_kubeconfig() -> Optional[str]:
 
 def _ensure_loaded() -> None:
     """Load kubeconfig once (thread-safe)."""
-    global _api_client, _custom_api, _core_api, _batch_api
+    global _api_client, _custom_api, _core_api
     if _custom_api is not None:
         return
     with _lock:
@@ -70,15 +70,14 @@ def _ensure_loaded() -> None:
         _api_client = client.ApiClient(configuration=configuration)
         _custom_api = client.CustomObjectsApi(_api_client)
         _core_api = client.CoreV1Api(_api_client)
-        _batch_api = client.BatchV1Api(_api_client)
         logger.info("Fournos K8s client initialised (timeout=%ds)", timeout)
 
 
 def reset() -> None:
     """Drop cached K8s clients so the next call re-reads the kubeconfig."""
-    global _api_client, _custom_api, _core_api, _batch_api
+    global _api_client, _custom_api, _core_api
     with _lock:
-        _api_client = _custom_api = _core_api = _batch_api = None
+        _api_client = _custom_api = _core_api = None
 
 
 def is_connected() -> bool:
@@ -161,6 +160,72 @@ def shutdown_fournos_job(
     name: str, value: str = "Stop", namespace: Optional[str] = None
 ) -> dict:
     return patch_fournos_job(name, {"spec": {"shutdown": value}}, namespace)
+
+
+def delete_fournos_job(name: str, namespace: Optional[str] = None) -> None:
+    _ensure_loaded()
+    if _custom_api is None:
+        raise RuntimeError("Kubernetes client not available")
+    ns = namespace or settings.FOURNOS_NAMESPACE
+    _custom_api.delete_namespaced_custom_object(
+        group=settings.FOURNOS_API_GROUP,
+        version=settings.FOURNOS_API_VERSION,
+        namespace=ns,
+        plural=settings.FOURNOS_JOB_PLURAL,
+        name=name,
+    )
+
+
+def trigger_recurring_now(name: str, namespace: Optional[str] = None) -> dict:
+    """Force an immediate off-cycle child run of a recurring FournosJob.
+
+    Mirrors the operator's own trigger-now mechanism exactly (see
+    fournos/fournos/handlers/lifecycle.py): annotate the parent job and the
+    operator creates a child on its next reconcile tick (~5s), then resets
+    the annotation to "false" itself.
+    """
+    return patch_fournos_job(
+        name,
+        {"metadata": {"annotations": {ANNOTATION_TRIGGER_NOW: "true"}}},
+        namespace,
+    )
+
+
+def list_recurring_jobs(namespace: Optional[str] = None) -> list:
+    """FournosJobs that are recurring templates (``spec.schedule`` set) —
+    i.e. the parent, not the children it spawns on each tick.
+    """
+    return [
+        j for j in list_fournos_jobs(namespace)
+        if j.get("spec", {}).get("schedule")
+    ]
+
+
+def is_lock_only(spec: dict) -> bool:
+    """Mirrors fournos/fournos/handlers/lifecycle.py::is_lock_only — a bare
+    ``lockUntil`` is enough to imply a timed lock job without also setting
+    ``lockOnly`` explicitly.
+    """
+    explicit = spec.get("lockOnly")
+    if explicit is not None:
+        return bool(explicit)
+    return bool(spec.get("lockUntil"))
+
+
+def list_cluster_locks(
+    namespace: Optional[str] = None, cluster: Optional[str] = None
+) -> list:
+    """FournosJobs that are sentinel cluster locks (``spec.lockOnly``, or a
+    bare ``spec.lockUntil``) — active now or scheduled to start later via
+    ``spec.scheduledStartTime``.
+    """
+    locks = [
+        j for j in list_fournos_jobs(namespace)
+        if is_lock_only(j.get("spec", {}))
+    ]
+    if cluster:
+        locks = [j for j in locks if j.get("spec", {}).get("cluster") == cluster]
+    return locks
 
 
 def watch_fournos_jobs(
@@ -368,11 +433,27 @@ def list_pods_for_job(
 
             container_ready = False
             restarts = 0
+            exit_code = None
+            term_reason = ""
+            term_message = ""
             if pod.status.container_statuses:
                 for cs in pod.status.container_statuses:
                     if cs.ready:
                         container_ready = True
                     restarts += cs.restart_count
+                    terminated = (
+                        cs.state.terminated
+                        if cs.state and cs.state.terminated
+                        else (
+                            cs.last_state.terminated
+                            if cs.last_state and cs.last_state.terminated
+                            else None
+                        )
+                    )
+                    if terminated:
+                        exit_code = terminated.exit_code
+                        term_reason = terminated.reason or ""
+                        term_message = terminated.message or ""
 
             if pod.metadata.name.startswith("affinity-assistant"):
                 continue
@@ -388,6 +469,9 @@ def list_pods_for_job(
                 "ready": container_ready,
                 "restarts": restarts,
                 "age_minutes": age_minutes,
+                "exit_code": exit_code,
+                "term_reason": term_reason,
+                "term_message": term_message,
                 "_created": created,
             })
         pods.sort(
@@ -431,440 +515,6 @@ def read_pod_log(
     except ApiException as exc:
         yield "Error reading logs: {}".format(exc.reason)
 
-
-# -- CronJob (schedules) operations --
-
-def list_managed_cronjobs(namespace: Optional[str] = None) -> list:
-    _ensure_loaded()
-    if _batch_api is None:
-        return []
-    ns = namespace or settings.FOURNOS_NAMESPACE
-    try:
-        result = _batch_api.list_namespaced_cron_job(
-            namespace=ns,
-            label_selector="{}={}".format(
-                SCHEDULE_LABEL, SCHEDULE_LABEL_VALUE
-            ),
-        )
-        return [_cronjob_to_dict(cj) for cj in result.items]
-    except ApiException as exc:
-        logger.error("Failed to list CronJobs: %s", exc.reason)
-        return []
-
-
-def get_managed_cronjob(
-    name: str, namespace: Optional[str] = None
-) -> Optional[dict]:
-    _ensure_loaded()
-    if _batch_api is None:
-        return None
-    ns = namespace or settings.FOURNOS_NAMESPACE
-    try:
-        cj = _batch_api.read_namespaced_cron_job(name=name, namespace=ns)
-        return _cronjob_to_dict(cj)
-    except ApiException as exc:
-        if exc.status == 404:
-            return None
-        logger.error("Failed to get CronJob %s: %s", name, exc.reason)
-        return None
-
-
-def create_cronjob(
-    name: str,
-    schedule: str,
-    project: str,
-    cluster: str,
-    pipeline: str,
-    preset: str,
-    image: str,
-    owner: str = "",
-    config_overrides: Optional[dict] = None,
-    resolver_script: str = "",
-    resolver_image: str = "",
-    resolver_filename: str = "",
-    namespace: Optional[str] = None,
-) -> dict:
-    _ensure_loaded()
-    if _batch_api is None:
-        raise RuntimeError("Kubernetes client not available")
-    ns = namespace or settings.FOURNOS_NAMESPACE
-
-    fjob_spec = {
-        "apiVersion": "{}/{}".format(
-            settings.FOURNOS_API_GROUP, settings.FOURNOS_API_VERSION
-        ),
-        "kind": "FournosJob",
-        "metadata": {
-            "generateName": "forge-{}-sched-".format(
-                project.replace("_", "-")
-            ),
-            "namespace": ns,
-            "labels": {
-                "fournos-launcher/schedule-name": name,
-                "fournos-launcher/trigger-type": "scheduled",
-            },
-        },
-        "spec": {
-            "cluster": cluster,
-            "displayName": "{} {}".format(project, preset).strip(),
-            "owner": owner or "fournos-dashboard/scheduler",
-            "pipeline": pipeline,
-            "exclusive": True,
-            "executionEngine": {
-                "forge": {
-                    "project": project,
-                    "args": [preset] if preset else [],
-                    "configOverrides": config_overrides or {},
-                }
-            },
-        },
-    }
-    fjob_json = json.dumps(fjob_spec)
-    api_path = (
-        "/apis/{}/{}/namespaces/{}/{}".format(
-            settings.FOURNOS_API_GROUP,
-            settings.FOURNOS_API_VERSION,
-            ns,
-            settings.FOURNOS_JOB_PLURAL,
-        )
-    )
-
-    submit_common = (
-        "token = open('/var/run/secrets/kubernetes.io/serviceaccount/token').read()\n"
-        "ctx = ssl.create_default_context(cafile="
-        "'/var/run/secrets/kubernetes.io/serviceaccount/ca.crt')\n"
-        "url = 'https://kubernetes.default.svc{}'\n".format(api_path)
-        + "print('Submitting FournosJob to', url)\n"
-        "print('Body:', json.dumps(body, indent=2))\n"
-        "data = json.dumps(body).encode()\n"
-        "req = urllib.request.Request(url, data=data, method='POST',\n"
-        "    headers={'Authorization': 'Bearer ' + token, "
-        "'Content-Type': 'application/json'})\n"
-        "try:\n"
-        "  resp = urllib.request.urlopen(req, context=ctx)\n"
-        "  result = json.loads(resp.read())\n"
-        "  print('FournosJob submitted:', "
-        "result['metadata'].get('name', 'unknown'))\n"
-        "except urllib.error.HTTPError as e:\n"
-        "  print('API error:', e.code, e.reason)\n"
-        "  print(e.read().decode())\n"
-        "  raise\n"
-    )
-
-    trigger_override = (
-        "trigger = os.environ.get('FOURNOS_TRIGGER_TYPE', 'scheduled')\n"
-        "body['metadata'].setdefault('labels', {})"
-        "['fournos-launcher/trigger-type'] = trigger\n"
-    )
-
-    if resolver_script:
-        submit_script = (
-            "import json, os, ssl, urllib.request, urllib.error\n"
-            "body = json.loads(os.environ['FJOB_JSON'])\n"
-            + trigger_override
-            + "overrides = body['spec']['executionEngine']['forge']"
-            ".setdefault('configOverrides', {})\n"
-            "env_file = '/shared/resolved.env'\n"
-            "if os.path.exists(env_file):\n"
-            "  with open(env_file) as f:\n"
-            "    for line in f:\n"
-            "      line = line.strip()\n"
-            "      if '=' in line and not line.startswith('#'):\n"
-            "        k, v = line.split('=', 1)\n"
-            "        overrides[k.strip()] = v.strip()\n"
-            "        print(f'Resolved: {k.strip()} = {v.strip()}')\n"
-            + submit_common
-        )
-    else:
-        submit_script = (
-            "import json, os, ssl, urllib.request, urllib.error\n"
-            "body = json.loads(os.environ['FJOB_JSON'])\n"
-            + trigger_override
-            + submit_common
-        )
-
-    submit_container = client.V1Container(
-        name="submit",
-        image=image or "python:3.12-slim",
-        command=["python", "-c", submit_script],
-        env=[client.V1EnvVar(name="FJOB_JSON", value=fjob_json)],
-    )
-
-    init_containers = None
-    volumes = None
-
-    if resolver_script:
-        is_python = resolver_filename.lower().endswith(".py")
-        default_resolver_img = (
-            "python:3.12-slim" if is_python else "alpine:latest"
-        )
-        script_key = resolver_filename or (
-            "resolver.py" if is_python else "resolver.sh"
-        )
-        configmap_name = "{}-resolver".format(name)
-
-        _create_resolver_configmap(
-            configmap_name, script_key, resolver_script, ns
-        )
-
-        script_vol = client.V1Volume(
-            name="resolver-script",
-            config_map=client.V1ConfigMapVolumeSource(
-                name=configmap_name, default_mode=0o755
-            ),
-        )
-        shared_vol = client.V1Volume(
-            name="shared",
-            empty_dir=client.V1EmptyDirVolumeSource(),
-        )
-        volumes = [script_vol, shared_vol]
-        script_mount = client.V1VolumeMount(
-            name="resolver-script",
-            mount_path="/resolver",
-            read_only=True,
-        )
-        shared_mount = client.V1VolumeMount(
-            name="shared", mount_path="/shared"
-        )
-        submit_container.volume_mounts = [shared_mount]
-
-        resolver_cmd = (
-            ["python", "/resolver/{}".format(script_key)]
-            if is_python
-            else ["sh", "/resolver/{}".format(script_key)]
-        )
-
-        init_containers = [
-            client.V1Container(
-                name="resolver",
-                image=resolver_image or default_resolver_img,
-                command=resolver_cmd,
-                volume_mounts=[script_mount, shared_mount],
-            )
-        ]
-
-    annotations = {
-        "fournos-launcher/project": project,
-        "fournos-launcher/cluster": cluster,
-        "fournos-launcher/pipeline": pipeline,
-        "fournos-launcher/preset": preset,
-        "fournos-launcher/owner": owner,
-    }
-    if resolver_script:
-        annotations["fournos-launcher/resolver-configmap"] = configmap_name
-        annotations["fournos-launcher/resolver-filename"] = script_key
-        if resolver_image:
-            annotations["fournos-launcher/resolver-image"] = resolver_image
-
-    cj_body = client.V1CronJob(
-        api_version="batch/v1",
-        kind="CronJob",
-        metadata=client.V1ObjectMeta(
-            name=name,
-            namespace=ns,
-            labels={
-                SCHEDULE_LABEL: SCHEDULE_LABEL_VALUE,
-                PROJECT_LABEL: project,
-            },
-            annotations=annotations,
-        ),
-        spec=client.V1CronJobSpec(
-            schedule=schedule,
-            suspend=False,
-            successful_jobs_history_limit=3,
-            failed_jobs_history_limit=3,
-            job_template=client.V1JobTemplateSpec(
-                spec=client.V1JobSpec(
-                    template=client.V1PodTemplateSpec(
-                        spec=client.V1PodSpec(
-                            init_containers=init_containers,
-                            containers=[submit_container],
-                            volumes=volumes,
-                            service_account_name="fournos-dashboard-sa",
-                            restart_policy="Never",
-                        )
-                    ),
-                    backoff_limit=0,
-                )
-            ),
-        ),
-    )
-
-    result = _batch_api.create_namespaced_cron_job(namespace=ns, body=cj_body)
-    return _cronjob_to_dict(result)
-
-
-def _create_resolver_configmap(
-    cm_name: str, script_key: str, script_content: str, namespace: str
-) -> None:
-    _ensure_loaded()
-    if _core_api is None:
-        raise RuntimeError("Kubernetes client not available")
-    cm = client.V1ConfigMap(
-        api_version="v1",
-        kind="ConfigMap",
-        metadata=client.V1ObjectMeta(
-            name=cm_name,
-            namespace=namespace,
-            labels={
-                SCHEDULE_LABEL: SCHEDULE_LABEL_VALUE,
-                "fournos-launcher/type": "resolver-script",
-            },
-        ),
-        data={script_key: script_content},
-    )
-    try:
-        _core_api.create_namespaced_config_map(namespace=namespace, body=cm)
-    except ApiException as exc:
-        if exc.status == 409:
-            _core_api.replace_namespaced_config_map(
-                name=cm_name, namespace=namespace, body=cm
-            )
-        else:
-            raise
-
-
-def get_resolver_script(
-    configmap_name: str, namespace: Optional[str] = None
-) -> tuple:
-    _ensure_loaded()
-    if _core_api is None:
-        return "", ""
-    ns = namespace or settings.FOURNOS_NAMESPACE
-    try:
-        cm = _core_api.read_namespaced_config_map(
-            name=configmap_name, namespace=ns
-        )
-        if cm.data:
-            for key, value in cm.data.items():
-                return key, value
-    except ApiException:
-        pass
-    return "", ""
-
-
-def trigger_cronjob(name: str, namespace: Optional[str] = None) -> str:
-    _ensure_loaded()
-    if _batch_api is None:
-        raise RuntimeError("Kubernetes client not available")
-    ns = namespace or settings.FOURNOS_NAMESPACE
-
-    cj = _batch_api.read_namespaced_cron_job(name=name, namespace=ns)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    job_name = "{}-manual-{}".format(name, ts)[:63]
-
-    job_spec = cj.spec.job_template.spec
-
-    trigger_env = client.V1EnvVar(
-        name="FOURNOS_TRIGGER_TYPE", value="manual"
-    )
-    if (
-        job_spec.template
-        and job_spec.template.spec
-        and job_spec.template.spec.containers
-    ):
-        for c in job_spec.template.spec.containers:
-            if c.env is None:
-                c.env = []
-            c.env.append(trigger_env)
-
-    job_body = client.V1Job(
-        api_version="batch/v1",
-        kind="Job",
-        metadata=client.V1ObjectMeta(
-            name=job_name,
-            namespace=ns,
-            labels={
-                SCHEDULE_LABEL: SCHEDULE_LABEL_VALUE,
-                "fournos-launcher/triggered-by": "manual",
-            },
-            annotations={
-                "cronjob.kubernetes.io/instantiate": "manual"
-            },
-        ),
-        spec=job_spec,
-    )
-
-    _batch_api.create_namespaced_job(namespace=ns, body=job_body)
-    return job_name
-
-
-def delete_cronjob(name: str, namespace: Optional[str] = None) -> None:
-    _ensure_loaded()
-    if _batch_api is None:
-        raise RuntimeError("Kubernetes client not available")
-    ns = namespace or settings.FOURNOS_NAMESPACE
-    cj = get_managed_cronjob(name, ns)
-    _batch_api.delete_namespaced_cron_job(
-        name=name, namespace=ns, propagation_policy="Foreground"
-    )
-    if cj and cj.get("resolver_configmap"):
-        _delete_resolver_configmap(cj["resolver_configmap"], ns)
-
-
-def _delete_resolver_configmap(cm_name: str, namespace: str) -> None:
-    _ensure_loaded()
-    if _core_api is None:
-        return
-    try:
-        _core_api.delete_namespaced_config_map(
-            name=cm_name, namespace=namespace
-        )
-    except ApiException:
-        pass
-
-
-def patch_cronjob_suspend(
-    name: str, suspend: bool, namespace: Optional[str] = None
-) -> dict:
-    _ensure_loaded()
-    if _batch_api is None:
-        raise RuntimeError("Kubernetes client not available")
-    ns = namespace or settings.FOURNOS_NAMESPACE
-    result = _batch_api.patch_namespaced_cron_job(
-        name=name, namespace=ns, body={"spec": {"suspend": suspend}}
-    )
-    return _cronjob_to_dict(result)
-
-
-def _cronjob_to_dict(cj: Any) -> dict:
-    meta = cj.metadata
-    annotations = meta.annotations or {}
-    resolver_configmap = annotations.get(
-        "fournos-launcher/resolver-configmap", ""
-    )
-    return {
-        "name": meta.name,
-        "namespace": meta.namespace,
-        "schedule": cj.spec.schedule,
-        "suspend": cj.spec.suspend or False,
-        "project": annotations.get("fournos-launcher/project", ""),
-        "cluster": annotations.get("fournos-launcher/cluster", ""),
-        "pipeline": annotations.get("fournos-launcher/pipeline", ""),
-        "preset": annotations.get("fournos-launcher/preset", ""),
-        "owner": annotations.get("fournos-launcher/owner", ""),
-        "resolver_configmap": resolver_configmap,
-        "resolver_image": annotations.get(
-            "fournos-launcher/resolver-image", ""
-        ),
-        "resolver_filename": annotations.get(
-            "fournos-launcher/resolver-filename", ""
-        ),
-        "has_resolver": bool(resolver_configmap),
-        "created_at": (
-            meta.creation_timestamp.isoformat()
-            if meta.creation_timestamp
-            else ""
-        ),
-        "last_schedule": (
-            cj.status.last_schedule_time.isoformat()
-            if cj.status and cj.status.last_schedule_time
-            else ""
-        ),
-        "active_count": (
-            len(cj.status.active) if cj.status and cj.status.active else 0
-        ),
-    }
 
 
 def sanitize_job_name(prefix: str) -> str:

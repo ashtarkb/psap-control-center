@@ -4,13 +4,19 @@ import type {
   FournosJobListResponse,
   FournosJobDetailResponse,
   FournosJobEvent,
-  FournosSchedule,
-  ScheduleRun,
+  RecurringJob,
+  ScheduleChildJob,
+  ClusterLock,
+  ClusterOverview,
+  CreateClusterLockRequest,
   ForgeProject,
   GitHubPR,
+  SlotHold,
   SubmitJobRequest,
   SubmitJobResponse,
-  CreateScheduleRequest,
+  SubmitMatrixRequest,
+  SubmitMatrixResponse,
+  ProjectUiSchemaResponse,
 } from '../types'
 
 // ─── Jobs ──────────────────────────────────────────────────────────────
@@ -21,6 +27,10 @@ export function useFournosJobs(params: {
   cluster?: string
   status?: string
   owner?: string
+  start_time?: string
+  end_time?: string
+  sort_by?: string
+  sort_dir?: 'asc' | 'desc'
   page?: number
   per_page?: number
 } = {}) {
@@ -99,11 +109,23 @@ export function useForgeProjects() {
   })
 }
 
-export function useForgeProjectInfo(name: string | undefined) {
-  return useQuery<ForgeProject>({
-    queryKey: ['forge-project', name],
-    queryFn: () => fournosApi.getProjectInfo(name!),
+export function useProjectUiSchema(name: string | undefined) {
+  return useQuery<ProjectUiSchemaResponse>({
+    queryKey: ['project-ui-schema', name],
+    queryFn: () => fournosApi.getProjectUiSchema(name!),
     enabled: !!name,
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  })
+}
+
+export function useRefreshProjectUiSchema() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (name: string) => fournosApi.refreshProjectUiSchema(name),
+    onSuccess: (_data, name) => {
+      qc.invalidateQueries({ queryKey: ['project-ui-schema', name] })
+    },
   })
 }
 
@@ -115,61 +137,118 @@ export function usePipelines() {
   })
 }
 
-// ─── Schedules ─────────────────────────────────────────────────────────
+// ─── Recurring jobs (native FournosJob spec.schedule) ──────────────────
 
-export function useFournosSchedules() {
-  return useQuery<FournosSchedule[]>({
-    queryKey: ['fournos-schedules'],
-    queryFn: () => fournosApi.listSchedules(),
+export function useRecurringJobs(cluster?: string) {
+  return useQuery<RecurringJob[]>({
+    queryKey: ['fournos-recurring-jobs', cluster],
+    queryFn: () => fournosApi.listRecurringJobs(cluster),
     refetchInterval: 30000,
   })
 }
 
-export function useScheduleRuns(name: string | undefined) {
-  return useQuery<ScheduleRun[]>({
-    queryKey: ['fournos-schedule-runs', name],
-    queryFn: () => fournosApi.getScheduleRuns(name!),
+export function useRecurringJobChildren(name: string | undefined) {
+  return useQuery<ScheduleChildJob[]>({
+    queryKey: ['fournos-recurring-job-children', name],
+    queryFn: () => fournosApi.getRecurringJobChildren(name!),
     enabled: !!name,
+    refetchInterval: 10000,
   })
 }
 
-export function useCreateSchedule() {
-  const qc = useQueryClient()
-  return useMutation<FournosSchedule, Error, CreateScheduleRequest>({
-    mutationFn: (req) => fournosApi.createSchedule(req),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['fournos-schedules'] })
-    },
-  })
-}
-
-export function useToggleSchedule() {
+export function useTriggerRecurringJob() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (name: string) => fournosApi.toggleSchedule(name),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['fournos-schedules'] })
-    },
-  })
-}
-
-export function useTriggerSchedule() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: (name: string) => fournosApi.triggerSchedule(name),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['fournos-schedules'] })
+    mutationFn: (name: string) => fournosApi.triggerRecurringJob(name),
+    onSuccess: (_data, name) => {
+      qc.invalidateQueries({ queryKey: ['fournos-recurring-jobs'] })
+      qc.invalidateQueries({ queryKey: ['fournos-recurring-job-children', name] })
       qc.invalidateQueries({ queryKey: ['fournos-jobs'] })
     },
   })
 }
 
-export function useDeleteSchedule() {
+export function useDeleteRecurringJob() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (name: string) => fournosApi.deleteSchedule(name),
+    mutationFn: (name: string) => fournosApi.deleteRecurringJob(name),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['fournos-schedules'] })
+      qc.invalidateQueries({ queryKey: ['fournos-recurring-jobs'] })
+      qc.invalidateQueries({ queryKey: ['fournos-jobs'] })
+    },
+  })
+}
+
+// ─── Cluster locks (native FournosJob spec.lockOnly) ────────────────────
+
+export function useClusterLocks(cluster?: string) {
+  return useQuery<ClusterLock[]>({
+    queryKey: ['fournos-cluster-locks', cluster],
+    queryFn: () => fournosApi.listClusterLocks(cluster),
+    refetchInterval: 30000,
+  })
+}
+
+export function useCreateClusterLock() {
+  const qc = useQueryClient()
+  return useMutation<ClusterLock, Error, CreateClusterLockRequest>({
+    mutationFn: (req) => fournosApi.createClusterLock(req),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['fournos-cluster-locks'] })
+      qc.invalidateQueries({ queryKey: ['fournos-cluster-overview'] })
+      qc.invalidateQueries({ queryKey: ['fournos-jobs'] })
+    },
+  })
+}
+
+export function useDeleteClusterLock() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (name: string) => fournosApi.deleteClusterLock(name),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['fournos-cluster-locks'] })
+      qc.invalidateQueries({ queryKey: ['fournos-cluster-overview'] })
+      qc.invalidateQueries({ queryKey: ['fournos-jobs'] })
+    },
+  })
+}
+
+export function useClusterOverview(cluster: string | undefined) {
+  return useQuery<ClusterOverview>({
+    queryKey: ['fournos-cluster-overview', cluster],
+    queryFn: () => fournosApi.getClusterOverview(cluster!),
+    enabled: !!cluster,
+    refetchInterval: 15000,
+  })
+}
+
+// ─── Calendar slot holds (ephemeral, UX-only anti-race claim) ──────────
+
+export function useSlotHolds(cluster: string | undefined, enabled = true) {
+  return useQuery<SlotHold[]>({
+    queryKey: ['fournos-slot-holds', cluster],
+    queryFn: () => fournosApi.listSlotHolds(cluster!),
+    enabled: !!cluster && enabled,
+    refetchInterval: 8000,
+  })
+}
+
+export function useHoldSlot() {
+  const qc = useQueryClient()
+  return useMutation<SlotHold, Error, { cluster: string; startTime: string }>({
+    mutationFn: ({ cluster, startTime }) => fournosApi.holdSlot(cluster, startTime),
+    onSuccess: (_data, { cluster }) => {
+      qc.invalidateQueries({ queryKey: ['fournos-slot-holds', cluster] })
+    },
+  })
+}
+
+export function useReleaseSlot() {
+  const qc = useQueryClient()
+  return useMutation<unknown, Error, { cluster: string; startTime: string }>({
+    mutationFn: ({ cluster, startTime }) => fournosApi.releaseSlot(cluster, startTime),
+    onSuccess: (_data, { cluster }) => {
+      qc.invalidateQueries({ queryKey: ['fournos-slot-holds', cluster] })
     },
   })
 }
@@ -181,5 +260,19 @@ export function useGithubPRs() {
     queryKey: ['github-prs'],
     queryFn: () => fournosApi.getGithubPRs(),
     staleTime: 60 * 1000,
+  })
+}
+
+// ─── Matrix (pipeline/CPT-style) submission ────────────────────────────
+// Generic across every project — driven entirely by a `kind: matrix` mode
+// in that project's ui/submit.yaml, no project-specific code.
+
+export function useSubmitMatrix() {
+  const qc = useQueryClient()
+  return useMutation<SubmitMatrixResponse, Error, SubmitMatrixRequest>({
+    mutationFn: (req) => fournosApi.submitMatrix(req),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['fournos-jobs'] })
+    },
   })
 }
