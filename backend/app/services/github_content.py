@@ -9,6 +9,7 @@ needs to pull its preset definitions from the Forge repository at runtime.
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
 
 import yaml
@@ -52,3 +53,41 @@ def list_yamls(directory: str) -> list:
         for item in items
         if isinstance(item, dict) and item.get("name", "").endswith(".yaml")
     )
+
+
+def list_dirs(directory: str) -> list:
+    """List subdirectory names (not full paths) directly under a Forge
+    repo directory. Used for project discovery — every top-level entry
+    under ``projects/`` is a Forge project.
+    """
+    url = "https://api.github.com/repos/{}/contents/{}".format(
+        settings.FORGE_GITHUB_REPO, directory
+    )
+    req = urllib.request.Request(
+        url, headers={"Accept": "application/vnd.github+json"}
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        items = json.loads(resp.read())
+
+    return sorted(
+        item["name"]
+        for item in items
+        if isinstance(item, dict) and item.get("type") == "dir"
+    )
+
+
+def path_exists(path: str) -> bool:
+    """Check whether a file or directory exists in the Forge repo."""
+    url = "https://api.github.com/repos/{}/contents/{}".format(
+        settings.FORGE_GITHUB_REPO, path
+    )
+    req = urllib.request.Request(
+        url, headers={"Accept": "application/vnd.github+json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15):
+            return True
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return False
+        raise
