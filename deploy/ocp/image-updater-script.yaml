@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: image-updater-script
+data:
+  check-and-update.sh: |
+    #!/bin/sh
+
+    # Polls Quay.io for new image digests and restarts the corresponding
+    # OCP deployment when a change is detected. Run as a CronJob (see
+    # image-updater-cronjob.yaml).
+    #
+    # Environment variables:
+    #   NAMESPACE         — target OCP namespace (set by the CronJob spec)
+    #   HTTPS_PROXY       — forward proxy for reaching quay.io (if needed)
+    #   NO_PROXY          — bypass proxy for internal cluster traffic
+
+    NAMESPACE="${NAMESPACE:-psap-control-center}"
+
+    get_remote_digest() {
+      REPO="$1"
+      TAG="$2"
+      RAW=$(curl -sf "https://quay.io/api/v1/repository/${REPO}/tag/?specificTag=${TAG}" 2>/dev/null || true)
+      if [ -z "$RAW" ]; then
+        echo ""
+        return
+      fi
+      DIGEST=$(echo "$RAW" | awk -F 'manifest_digest": "' '{print $2}' | awk -F '"' '{print $1}')
+      echo "$DIGEST"
+    }
+
+    check_and_restart() {
+      DEPLOY="$1"
+      REPO="$2"
+      TAG="$3"
+      DIGEST_FILE="/tmp/${DEPLOY}-last-digest"
+
+      REMOTE_DIGEST=$(get_remote_digest "$REPO" "$TAG")
+      if [ -z "$REMOTE_DIGEST" ]; then
+        echo "WARN: Could not fetch remote digest for ${REPO}:${TAG}"
+        return
+      fi
+
+      LAST_DIGEST=""
+      if [ -f "$DIGEST_FILE" ]; then
+        LAST_DIGEST=$(cat "$DIGEST_FILE")
+      fi
+
+      if [ "$REMOTE_DIGEST" != "$LAST_DIGEST" ]; then
+        echo "NEW IMAGE detected for $DEPLOY: $REMOTE_DIGEST (was: ${LAST_DIGEST:-none})"
+        kubectl rollout restart deployment/"$DEPLOY" -n "$NAMESPACE"
+        echo "$REMOTE_DIGEST" > "$DIGEST_FILE"
+      else
+        echo "No change for $DEPLOY ($REMOTE_DIGEST)"
+      fi
+    }
+
+    echo "=== Image update check: $(date) ==="
+    check_and_restart "psap-control-center-backend" "redhat-performance/psap-control-center-backend" "${IMAGE_TAG:-latest}"
+    check_and_restart "psap-control-center-frontend" "redhat-performance/psap-control-center-frontend" "${IMAGE_TAG:-latest}"
+    echo "=== Done ==="

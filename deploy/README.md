@@ -179,7 +179,104 @@ oc get route psap-control-center
 curl -k https://control-center.<apps-domain>/api/v1/health
 ```
 
-## Rebuilding After Code Changes
+## CI/CD: Automatic Build & Deploy
+
+The repository includes GitHub Actions workflows and OCP manifests for
+fully automatic build-and-deploy on every push. Two environments are
+supported side-by-side on the same cluster:
+
+| Environment | Branch | Image Tag | OCP Namespace | Route Prefix | Banner |
+|-------------|--------|-----------|---------------|--------------|--------|
+| **Production** | `main` | `:latest` | `psap-control-center` | `control-center` | None |
+| **Development** | `development` | `:dev` | `psap-control-center-dev` | `dev-control-center` | "DEVELOPMENT" |
+
+### How it works
+
+1. **Push to branch** → GitHub Actions builds frontend + backend images and
+   pushes them to Quay.io with the appropriate tag.
+2. **OCP CronJob** (runs every 2 minutes) polls Quay for new image digests.
+   When a change is detected, it triggers `kubectl rollout restart` for the
+   corresponding deployment.
+3. **Total time from push to live:** ~4–6 minutes.
+
+### GitHub Actions workflows
+
+| File | Trigger | Images |
+|------|---------|--------|
+| `.github/workflows/prod-deploy.yml` | Push to `main` | `:latest` |
+| `.github/workflows/dev-deploy.yml` | Push to `development` | `:dev` (with DEVELOPMENT banner) |
+
+Both workflows use the same Quay credentials stored as GitHub repository
+secrets:
+
+- `QUAY_CONTROL_CENTER_USERNAME`
+- `QUAY_CONTROL_CENTER_PASSWORD`
+
+### Setting up the OCP image updater
+
+The image updater runs inside OCP and requires no external cluster access
+from GitHub Actions. Apply the manifests in order:
+
+```bash
+# 1. ServiceAccount + RBAC
+oc apply -n <namespace> -f deploy/ocp/image-updater-sa.yaml
+
+# 2. Updater script
+oc apply -n <namespace> -f deploy/ocp/image-updater-script.yaml
+
+# 3. CronJob (edit IMAGE_TAG and proxy settings first if needed)
+oc apply -n <namespace> -f deploy/ocp/image-updater-cronjob.yaml
+```
+
+**Before applying the CronJob**, edit `deploy/ocp/image-updater-cronjob.yaml`:
+
+- Set `IMAGE_TAG` to `latest` (prod) or `dev` (dev).
+- Adjust `HTTPS_PROXY` / `NO_PROXY` for your cluster's network, or remove
+  them entirely if no proxy is needed.
+
+### Verifying the updater
+
+```bash
+# Check CronJob status
+oc get cronjob image-updater -n <namespace>
+
+# View the latest job's logs
+oc logs -n <namespace> job/$(oc get jobs -n <namespace> \
+  --sort-by=.metadata.creationTimestamp -o name | tail -1 | cut -d/ -f2)
+```
+
+### Setting up a dev namespace from scratch
+
+```bash
+# Create namespace
+oc new-project psap-control-center-dev
+
+# Copy secrets from prod (or create fresh ones)
+oc get secret psap-control-center-admin -n psap-control-center -o json \
+  | jq '.metadata.namespace = "psap-control-center-dev" | del(.metadata.uid,.metadata.resourceVersion,.metadata.creationTimestamp)' \
+  | oc apply -f -
+oc get secret psap-control-center-config -n psap-control-center -o json \
+  | jq '.metadata.namespace = "psap-control-center-dev" | del(.metadata.uid,.metadata.resourceVersion,.metadata.creationTimestamp)' \
+  | oc apply -f -
+
+# Apply PVCs, deploy PostgreSQL, backend, frontend (same as prod steps above
+# but using :dev image tags and the dev namespace)
+
+# Apply image updater with IMAGE_TAG=dev
+oc apply -n psap-control-center-dev -f deploy/ocp/image-updater-sa.yaml
+oc apply -n psap-control-center-dev -f deploy/ocp/image-updater-script.yaml
+# Edit IMAGE_TAG to "dev" in the CronJob, then:
+oc apply -n psap-control-center-dev -f deploy/ocp/image-updater-cronjob.yaml
+
+# Create route with dev prefix
+oc create route edge psap-control-center-dev \
+  --service=psap-control-center-frontend \
+  --hostname=dev-control-center.<apps-domain>
+```
+
+## Manual Rebuilding (without CI/CD)
+
+If you need to build and deploy manually (e.g. no GitHub Actions access):
 
 ```bash
 # Backend

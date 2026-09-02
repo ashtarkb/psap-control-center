@@ -1,0 +1,54 @@
+# Polls Quay.io every 2 minutes for new image digests and restarts
+# deployments when a change is detected. Requires the ServiceAccount,
+# Role, RoleBinding from image-updater-sa.yaml and the ConfigMap from
+# image-updater-script.yaml to be applied first.
+#
+# Customize before applying:
+#   - metadata.namespace   — must match the target namespace
+#   - NAMESPACE env var    — must match metadata.namespace
+#   - IMAGE_TAG env var    — "latest" for prod, "dev" for dev
+#   - HTTPS_PROXY / NO_PROXY — adjust for your cluster's network
+
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: image-updater
+spec:
+  schedule: "*/2 * * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 60
+      template:
+        spec:
+          serviceAccountName: image-updater
+          restartPolicy: Never
+          containers:
+          - name: updater
+            image: registry.redhat.io/openshift4/ose-cli:latest
+            command: ["/bin/sh", "/scripts/check-and-update.sh"]
+            env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: IMAGE_TAG
+              value: "latest"
+            - name: HTTPS_PROXY
+              value: http://10.2.32.57:3128
+            - name: HTTP_PROXY
+              value: http://10.2.32.57:3128
+            - name: NO_PROXY
+              value: .intlab.redhat.com,.svc,.cluster.local,localhost,127.0.0.1,172.30.0.0/16,10.128.0.0/14
+            - name: no_proxy
+              value: .intlab.redhat.com,.svc,.cluster.local,localhost,127.0.0.1,172.30.0.0/16,10.128.0.0/14
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+          volumes:
+          - name: scripts
+            configMap:
+              name: image-updater-script
+              defaultMode: 0755
