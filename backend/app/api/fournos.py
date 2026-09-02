@@ -887,6 +887,7 @@ async def list_pipelines():
 # is shared across the whole deployment, not per-user.
 
 _open_prs_cache: Optional[list] = None
+_open_prs_inflight: Optional["asyncio.Future[list]"] = None
 
 
 def _fetch_github_open_prs_sync() -> list:
@@ -913,23 +914,57 @@ def _fetch_github_open_prs_sync() -> list:
     ]
 
 
-@router.get("/github/open-prs", response_model=List[GitHubPR])
-async def github_open_prs(refresh: bool = False):
-    global _open_prs_cache
-    if _open_prs_cache is not None and not refresh:
-        return _open_prs_cache
+async def _fetch_open_prs_coalesced() -> list:
+    """Fetch open PRs from GitHub, coalescing concurrent callers into a
+    single outbound request (protects against a stampede on cold cache /
+    simultaneous forced refreshes) and caching the result on success.
+    """
+    global _open_prs_cache, _open_prs_inflight
 
+    if _open_prs_inflight is not None:
+        return await _open_prs_inflight
+
+    future: "asyncio.Future[list]" = asyncio.ensure_future(
+        asyncio.to_thread(_fetch_github_open_prs_sync)
+    )
+    _open_prs_inflight = future
     try:
-        prs = await asyncio.to_thread(_fetch_github_open_prs_sync)
-    except Exception as exc:
-        if _open_prs_cache is not None:
-            # Serve the last known-good list rather than erroring out (and
-            # don't let a transient failure clobber a good cache).
-            return _open_prs_cache
-        raise HTTPException(502, "GitHub API error: {}".format(exc))
+        prs = await future
+    finally:
+        _open_prs_inflight = None
 
     _open_prs_cache = prs
     return prs
+
+
+@router.get("/github/open-prs", response_model=List[GitHubPR])
+async def github_open_prs():
+    """Return the cached open-PR list, fetching it from GitHub on first use.
+    Never refetches once cached — call POST .../open-prs/refresh to force that.
+    """
+    if _open_prs_cache is not None:
+        return _open_prs_cache
+
+    try:
+        return await _fetch_open_prs_coalesced()
+    except Exception as exc:
+        logger.error("Failed to fetch open PRs from GitHub: %s", exc)
+        raise HTTPException(502, "GitHub API error: {}".format(exc))
+
+
+@router.post("/github/open-prs/refresh", response_model=List[GitHubPR])
+async def github_open_prs_refresh(_=Depends(require_auth)):
+    """Force-refresh the open-PR list from GitHub. Auth-gated since, unlike
+    the cached GET above, every call here is a real outbound GitHub request
+    and could otherwise be used to exhaust the deployment-wide rate limit.
+    On failure this surfaces a 502 rather than silently serving stale data,
+    so the UI's Refresh action gives honest feedback.
+    """
+    try:
+        return await _fetch_open_prs_coalesced()
+    except Exception as exc:
+        logger.error("Failed to refresh open PRs from GitHub: %s", exc)
+        raise HTTPException(502, "GitHub API error: {}".format(exc))
 
 
 # ─── routes: recurring jobs ──────────────────────────────────────────────
