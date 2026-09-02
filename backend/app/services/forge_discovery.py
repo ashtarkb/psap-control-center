@@ -81,9 +81,24 @@ def discover_projects(force_refresh: bool = False) -> List[ProjectInfo]:
     for name in EXCLUDED_PROJECTS:
         result.pop(name, None)
 
-    _cache = result
+    if result:
+        _cache = result
+    elif _cache is None:
+        # Every discovery path failed (e.g. GitHub rate-limited) and there's
+        # nothing previously cached to fall back to. Deliberately leave
+        # _cache as None rather than caching this empty result, so the next
+        # call retries instead of permanently returning an empty list.
+        logger.warning("Forge project discovery failed; will retry next call")
+    else:
+        # Keep serving the last known-good list rather than clobbering it
+        # with a transient empty result.
+        logger.warning(
+            "Forge project discovery failed; serving %d previously cached projects",
+            len(_cache),
+        )
+
     logger.info("Discovered %d Forge projects", len(result))
-    return list(result.values())
+    return list(_cache.values()) if _cache else []
 
 
 def _discover_from_repo(projects_dir: Path) -> Dict[str, ProjectInfo]:

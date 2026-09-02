@@ -539,6 +539,11 @@ export const fournosApi = {
     return data
   },
 
+  refreshGithubPRs: async () => {
+    const { data } = await api.post('/fournos/github/open-prs/refresh')
+    return data
+  },
+
   submitMatrix: async (req: import('../types').SubmitMatrixRequest) => {
     const { data } = await api.post('/fournos/submit-matrix', req)
     return data

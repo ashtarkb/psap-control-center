@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import toast from 'react-hot-toast'
 import { fournosApi } from '../services/api'
 import type {
   FournosJobListResponse,
@@ -259,7 +260,25 @@ export function useGithubPRs() {
   return useQuery<GitHubPR[]>({
     queryKey: ['github-prs'],
     queryFn: () => fournosApi.getGithubPRs(),
-    staleTime: 60 * 1000,
+    // Server caches this indefinitely (fetched from GitHub once, reused for
+    // everyone) — mirror that here so we don't refetch on every mount/focus.
+    // Use useRefreshGithubPRs() to force a real refresh from GitHub.
+    staleTime: Infinity,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+  })
+}
+
+export function useRefreshGithubPRs() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => fournosApi.refreshGithubPRs(),
+    onSuccess: (data) => {
+      queryClient.setQueryData(['github-prs'], data)
+    },
+    onError: (error: Error) => {
+      toast.error(`Failed to refresh PRs from GitHub: ${error.message}`)
+    },
   })
 }
 
