@@ -287,7 +287,7 @@ export function useRefreshGithubPRs() {
 //
 // Everything sourced from the Forge GitHub repo (projects, ui/submit.yaml
 // schemas, pipeline definitions, open PRs) is refreshed on one shared
-// 5-min schedule server-side (github_sync_service.py) rather than on every
+// shared server-side schedule (github_sync_service.py) rather than on every
 // page load. This just surfaces that status + a manual "Refresh now" button.
 
 export function useGithubSyncStatus() {

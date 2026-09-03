@@ -370,6 +370,14 @@ async def get_job(job_name: str):
             pr_task = asyncio.to_thread(k8s.list_pipelineruns_for_job, job_name)
         pods_raw, pr_result = await asyncio.gather(pods_task, pr_task)
 
+        # Preserve the previous label-based fallback for stale/missing
+        # status.pipelineRun references without adding calls to the happy path.
+        if pr_name and not pr_result:
+            prs = await asyncio.to_thread(
+                k8s.list_pipelineruns_for_job, job_name
+            )
+            pr_result = prs[0] if prs else None
+
         pods = [
             {
                 "name": p["name"],
@@ -453,8 +461,15 @@ async def get_job(job_name: str):
     # that's the one that actually broke the run; surfaced the same way
     # the live view highlights its "current" step.
     current_step = next(
-        (s["name"] for s in stages if s.get("status") not in
-         ("Succeeded", "Skipped", "Cancelled")),
+        (
+            {
+                "name": s["name"],
+                "displayName": s.get("displayName", s["name"]),
+                "startTime": s.get("startTime"),
+            }
+            for s in stages
+            if s.get("status") not in ("Succeeded", "Skipped", "Cancelled")
+        ),
         None,
     )
 
@@ -868,8 +883,15 @@ async def project_ui_schema_api(project_name: str):
 
 @router.post("/projects/{project_name}/ui-schema/refresh")
 async def project_ui_schema_refresh(project_name: str, _=Depends(require_auth)):
-    """Force-refresh the cached ui/submit.yaml for a project from GitHub."""
-    schema = await project_ui_schema.refresh_schema(project_name)
+    """Refresh GitHub caches through the shared deployment-wide cooldown."""
+    try:
+        await github_sync_service.refresh_now()
+    except github_sync_service.GithubSyncError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="GitHub sync failed: {}".format("; ".join(exc.errors)),
+        )
+    schema = await project_ui_schema.get_schema(project_name)
     return {"status": "ok", "found": schema is not None}
 
 
@@ -967,7 +989,11 @@ async def github_open_prs_refresh(_=Depends(require_auth)):
     so the UI's Refresh action gives honest feedback.
     """
     try:
-        return await _fetch_open_prs_coalesced()
+        await github_sync_service.refresh_now()
+        return _open_prs_cache or []
+    except github_sync_service.GithubSyncError as exc:
+        logger.error("Failed to refresh GitHub caches: %s", exc)
+        raise HTTPException(502, "GitHub sync failed: {}".format(exc))
     except Exception as exc:
         logger.error("Failed to refresh open PRs from GitHub: %s", exc)
         raise HTTPException(502, "GitHub API error: {}".format(exc))
@@ -975,7 +1001,7 @@ async def github_open_prs_refresh(_=Depends(require_auth)):
 
 # ─── routes: GitHub sync status/refresh ─────────────────────────────────
 #
-# Manual counterpart to github_sync_service's periodic (every 30 min)
+# Manual counterpart to github_sync_service's configurable periodic refresh
 # refresh — lets a user force an immediate update (e.g. right after
 # merging a new preset) instead of waiting out the interval, subject to
 # the same server-side cooldown (so it can't be spammed into exhausting

@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     FORGE_REPO_PATH: Optional[str] = None
     FORGE_PROJECTS_CONFIG_PATH: str = "/etc/fournos-dashboard/projects.yaml"
     FORGE_GITHUB_REPO: str = "openshift-psap/forge"
+    # A full unauthenticated refresh consumes several dozen GitHub API calls.
+    # Keep this configurable, but default to no more than one cycle per hour.
+    GITHUB_SYNC_INTERVAL_SECONDS: int = 60 * 60
 
     FOURNOS_DEFAULT_PIPELINES: str = "forge-full,forge-prepare-test,forge-test-only,forge-prepare-only,forge-replot,nightly"
 

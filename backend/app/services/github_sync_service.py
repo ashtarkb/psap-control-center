@@ -43,6 +43,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from app.core.config import settings
 from app.services import forge_discovery
 from app.services import pipeline_definitions
 from app.services import project_ui_schema
@@ -51,14 +52,14 @@ logger = logging.getLogger(__name__)
 
 # How often the background task runs a refresh, *and* the minimum time
 # that must elapse between any two completed refreshes (manual or
-# periodic) — see refresh_now()'s cooldown check below. 30 minutes keeps
-# this well clear of GitHub's 60 req/hr unauthenticated limit even though
+# periodic) — see refresh_now()'s cooldown check below. One hour leaves
+# room under GitHub's 60 req/hr unauthenticated limit even though
 # a single refresh cycle (project discovery + per-project ui/submit.yaml +
 # pipeline definitions + open PRs) can itself cost several dozen calls on
 # a deployment with more than a handful of Forge projects — if that ever
 # becomes a problem in practice, raise this further (env-tunable via
 # GITHUB_SYNC_INTERVAL_SECONDS below) rather than lowering it.
-PERIODIC_INTERVAL_SECONDS = 30 * 60
+PERIODIC_INTERVAL_SECONDS = settings.GITHUB_SYNC_INTERVAL_SECONDS
 MIN_REFRESH_INTERVAL_SECONDS = PERIODIC_INTERVAL_SECONDS
 
 _status = {
@@ -98,7 +99,9 @@ async def _do_refresh() -> dict:
     errors: List[str] = []
 
     try:
-        projects = await asyncio.to_thread(forge_discovery.discover_projects, True)
+        projects = await asyncio.to_thread(
+            forge_discovery.discover_projects, True, True
+        )
     except Exception as exc:
         errors.append("project discovery: {}".format(exc))
         projects = []
@@ -138,6 +141,30 @@ async def _do_refresh() -> dict:
     return {"project_count": len(projects)}
 
 
+async def _run_refresh() -> dict:
+    """Own one refresh lifecycle and return the public status shape."""
+    global _inflight
+
+    try:
+        result = await _do_refresh()
+    except Exception as exc:
+        logger.error("GitHub sync failed: %s", exc)
+        _status["last_error"] = str(exc)
+        # last_synced_at is deliberately left untouched on failure — a
+        # failed refresh must never make stale cached data look freshly
+        # synced to the UI.
+        raise
+    else:
+        _status["last_error"] = None
+        _status["project_count"] = result.get("project_count", 0)
+        _status["last_synced_at"] = datetime.now(timezone.utc)
+        _status["in_progress"] = False
+        return get_status()
+    finally:
+        _status["in_progress"] = False
+        _inflight = None
+
+
 async def refresh_now() -> dict:
     """Refresh everything, coalescing concurrent callers onto one shared
     in-flight refresh, and skipping entirely (returning the last known
@@ -150,7 +177,9 @@ async def refresh_now() -> dict:
     global _inflight
 
     if _inflight is not None:
-        return await _inflight
+        # Shield the deployment-wide refresh from a disconnected/cancelled
+        # HTTP caller; every waiter receives the same public status result.
+        return await asyncio.shield(_inflight)
 
     last_synced = _status["last_synced_at"]
     if last_synced is not None:
@@ -166,25 +195,9 @@ async def refresh_now() -> dict:
 
     _status["in_progress"] = True
     _status["last_attempted_at"] = datetime.now(timezone.utc)
-    future = asyncio.ensure_future(_do_refresh())
+    future = asyncio.ensure_future(_run_refresh())
     _inflight = future
-    try:
-        result = await future
-    except Exception as exc:
-        logger.error("GitHub sync failed: %s", exc)
-        _status["last_error"] = str(exc)
-        # last_synced_at is deliberately left untouched on failure — a
-        # failed refresh must never make stale cached data look freshly
-        # synced to the UI.
-        raise
-    else:
-        _status["last_error"] = None
-        _status["project_count"] = result.get("project_count", 0)
-        _status["last_synced_at"] = datetime.now(timezone.utc)
-        return get_status()
-    finally:
-        _status["in_progress"] = False
-        _inflight = None
+    return await asyncio.shield(future)
 
 
 async def periodic_refresh_task() -> None:

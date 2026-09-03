@@ -125,7 +125,9 @@ def _iter_ref_entries(
 # Mode-level preset partitioning (RHAIIS-style categorization, generalized)
 # ---------------------------------------------------------------------------
 
-def _resolve_mode_presets(project: str, mode: UiMode) -> None:
+def _resolve_mode_presets(
+    project: str, mode: UiMode, strict: bool = False
+) -> None:
     """Partition a shared pool of named presets (`mode.presets_ref`, usually
     ``presets.d``) across this mode's fields.
 
@@ -148,6 +150,8 @@ def _resolve_mode_presets(project: str, mode: UiMode) -> None:
     try:
         entries = list(_iter_ref_entries(project, mode.presets_ref, as_preset_pool=True))
     except Exception as exc:
+        if strict:
+            raise
         logger.warning(
             "Failed to resolve presets_ref for %s mode %r: %s", project, mode.id, exc
         )
@@ -225,7 +229,9 @@ def _parse_matrix_models(raw: object, tp_key: str) -> List[UiPipelineModel]:
     return models
 
 
-def _resolve_matrix_pipelines(project: str, mode: UiMode) -> None:
+def _resolve_matrix_pipelines(
+    project: str, mode: UiMode, strict: bool = False
+) -> None:
     """Scan `mode.presets_ref` for entries tagged with `mode.matrix.marker_key`
     and expand each into a `UiPipeline` — a fully generic stand-in for what
     used to be RHAIIS-only `__cpt` parsing, driven entirely by the marker/
@@ -238,6 +244,8 @@ def _resolve_matrix_pipelines(project: str, mode: UiMode) -> None:
     try:
         entries = list(_iter_ref_entries(project, mode.presets_ref, as_preset_pool=True))
     except Exception as exc:
+        if strict:
+            raise
         logger.warning(
             "Failed to resolve matrix pipelines for %s mode %r: %s", project, mode.id, exc
         )
@@ -309,7 +317,9 @@ def _enrich_options_with_ref(project: str, field: UiField, ref: UiOptionsRef) ->
         option.extra = dict(data)
 
 
-def _resolve_field_options_ref(project: str, field: UiField) -> None:
+def _resolve_field_options_ref(
+    project: str, field: UiField, strict: bool = False
+) -> None:
     ref = field.options_ref
     if ref is None:
         return
@@ -319,19 +329,23 @@ def _resolve_field_options_ref(project: str, field: UiField) -> None:
         else:
             field.options = _build_options_from_ref(project, ref)
     except Exception as exc:
+        if strict:
+            raise
         logger.warning(
             "Failed to resolve options_ref for %s field %r: %s", project, field.key, exc
         )
 
 
-def _resolve_schema(project: str, schema: ProjectUiSchema) -> ProjectUiSchema:
+def _resolve_schema(
+    project: str, schema: ProjectUiSchema, strict: bool = False
+) -> ProjectUiSchema:
     for mode in schema.modes:
-        _resolve_mode_presets(project, mode)
+        _resolve_mode_presets(project, mode, strict=strict)
         if mode.kind == "matrix":
-            _resolve_matrix_pipelines(project, mode)
+            _resolve_matrix_pipelines(project, mode, strict=strict)
         for section in mode.sections:
             for field in section.fields:
-                _resolve_field_options_ref(project, field)
+                _resolve_field_options_ref(project, field, strict=strict)
     return schema
 
 
@@ -339,7 +353,9 @@ def _resolve_schema(project: str, schema: ProjectUiSchema) -> ProjectUiSchema:
 # Public API
 # ---------------------------------------------------------------------------
 
-def fetch_schema(project: str) -> Optional[ProjectUiSchema]:
+def fetch_schema(
+    project: str, strict: bool = False
+) -> Optional[ProjectUiSchema]:
     """Fetch + resolve a project's ui/submit.yaml from the Forge GitHub
     repo. Returns None if the project hasn't published one (or it's
     invalid).
@@ -349,9 +365,13 @@ def fetch_schema(project: str) -> Optional[ProjectUiSchema]:
     except urllib.error.HTTPError as exc:
         if exc.code != 404:
             logger.error("Failed to fetch ui/submit.yaml for %s: %s", project, exc)
+            if strict:
+                raise
         return None
     except Exception as exc:
         logger.error("Failed to fetch ui/submit.yaml for %s: %s", project, exc)
+        if strict:
+            raise
         return None
 
     if not raw:
@@ -361,13 +381,16 @@ def fetch_schema(project: str) -> Optional[ProjectUiSchema]:
         schema = ProjectUiSchema.model_validate(raw)
     except Exception as exc:
         logger.error("Invalid ui/submit.yaml for %s: %s", project, exc)
+        if strict:
+            raise
         return None
 
-    return _resolve_schema(project, schema)
+    return _resolve_schema(project, schema, strict=strict)
 
 
 async def _fetch_and_cache(project: str) -> Optional[ProjectUiSchema]:
-    result = await asyncio.to_thread(fetch_schema, project)
+    # Network/validation failures must not overwrite a last-known-good cache.
+    result = await asyncio.to_thread(fetch_schema, project, True)
     _cache[project] = result
     return result
 
@@ -398,7 +421,11 @@ async def get_schema(project: str) -> Optional[ProjectUiSchema]:
     """
     if project in _cache:
         return _cache[project]
-    return await _fetch_coalesced(project)
+    try:
+        return await _fetch_coalesced(project)
+    except Exception as exc:
+        logger.error("Failed to populate UI-schema cache for %s: %s", project, exc)
+        return _cache.get(project)
 
 
 async def refresh_schema(project: str) -> Optional[ProjectUiSchema]:

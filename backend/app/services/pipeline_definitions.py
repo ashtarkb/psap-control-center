@@ -30,6 +30,7 @@ _WORKFLOWS_DIR = "fournos/gitops/base/workflows"
 
 _cache: Optional[Dict[str, dict]] = None
 _inflight: Optional["asyncio.Future[Dict[str, dict]]"] = None
+_refresh_inflight: Optional["asyncio.Future[Dict[str, dict]]"] = None
 
 
 def _extract(doc: dict) -> Optional[dict]:
@@ -44,28 +45,44 @@ def _extract(doc: dict) -> Optional[dict]:
     return {"name": name, "tasks": tasks, "finally": finally_tasks}
 
 
+def _load_all_strict_sync() -> Dict[str, dict]:
+    """Load a complete snapshot or raise without touching the cache."""
+    result: Dict[str, dict] = {}
+    paths = list_yamls(_WORKFLOWS_DIR)
+    if not paths:
+        raise RuntimeError("Forge returned no pipeline definitions")
+    errors = []
+    for path in paths:
+        try:
+            doc = fetch_yaml(path)
+        except Exception as exc:
+            errors.append("{}: {}".format(path, exc))
+            continue
+        parsed = _extract(doc)
+        if parsed:
+            result[parsed["name"]] = parsed
+    if errors:
+        raise RuntimeError(
+            "Could not load all pipeline definitions: {}".format("; ".join(errors))
+        )
+    return result
+
+
 def load_all_sync() -> Dict[str, dict]:
     """Blocking load of every Pipeline definition in Forge's workflows dir,
     keyed by Pipeline name (e.g. "forge-test-only"). Safe to call from a
     plain thread (used directly by the local dev mock) or via
     ``asyncio.to_thread`` (used by ``get_all``/``refresh_all`` below).
     """
-    result: Dict[str, dict] = {}
     try:
-        paths = list_yamls(_WORKFLOWS_DIR)
+        return _load_all_strict_sync()
     except Exception as exc:
-        logger.warning("Could not list Forge pipeline definitions in %s: %s", _WORKFLOWS_DIR, exc)
-        return result
-    for path in paths:
-        try:
-            doc = fetch_yaml(path)
-        except Exception as exc:
-            logger.warning("Could not fetch pipeline definition %s: %s", path, exc)
-            continue
-        parsed = _extract(doc)
-        if parsed:
-            result[parsed["name"]] = parsed
-    return result
+        logger.warning(
+            "Could not load Forge pipeline definitions in %s: %s",
+            _WORKFLOWS_DIR,
+            exc,
+        )
+        return {}
 
 
 def get_all_sync() -> Dict[str, dict]:
@@ -103,9 +120,18 @@ async def get_all() -> Dict[str, dict]:
 
 
 async def refresh_all() -> Dict[str, dict]:
-    global _cache
-    _cache = await _fetch_coalesced()
-    return _cache
+    global _cache, _refresh_inflight
+    if _refresh_inflight is not None:
+        return await _refresh_inflight
+
+    future = asyncio.ensure_future(asyncio.to_thread(_load_all_strict_sync))
+    _refresh_inflight = future
+    try:
+        refreshed = await future
+        _cache = refreshed
+        return refreshed
+    finally:
+        _refresh_inflight = None
 
 
 async def get_definition(pipeline_name: str) -> Optional[dict]:

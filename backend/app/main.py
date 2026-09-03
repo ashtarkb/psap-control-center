@@ -212,7 +212,7 @@ async def lifespan(app: FastAPI):
 
     from app.services.github_sync_service import periodic_refresh_task
     github_sync_task = asyncio.create_task(periodic_refresh_task())
-    logger.info("GitHub sync task started (every 30 min)")
+    logger.info("GitHub sync task started (every %ds)", settings.GITHUB_SYNC_INTERVAL_SECONDS)
 
     # Start fournos job watcher (best-effort)
     try:

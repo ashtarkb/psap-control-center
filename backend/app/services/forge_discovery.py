@@ -54,7 +54,9 @@ def _forge_projects_dir() -> Optional[Path]:
     return None
 
 
-def discover_projects(force_refresh: bool = False) -> List[ProjectInfo]:
+def discover_projects(
+    force_refresh: bool = False, strict: bool = False
+) -> List[ProjectInfo]:
     global _cache
     if _cache is not None and not force_refresh:
         return list(_cache.values())
@@ -71,7 +73,7 @@ def discover_projects(force_refresh: bool = False) -> List[ProjectInfo]:
     # repo, so nothing needs to be manually kept in sync — same mechanism
     # already used to fetch each project's ui/submit.yaml.
     if not result:
-        result = _discover_from_github()
+        result = _discover_from_github(strict=strict)
 
     # Last-resort manual override (e.g. GitHub is unreachable from this
     # cluster's network) via a mounted ConfigMap.
@@ -131,11 +133,13 @@ def _discover_from_repo(projects_dir: Path) -> Dict[str, ProjectInfo]:
     return result
 
 
-def _discover_from_github() -> Dict[str, ProjectInfo]:
+def _discover_from_github(strict: bool = False) -> Dict[str, ProjectInfo]:
     skip = {"core", "__pycache__"}
     try:
         names = list_dirs("projects")
     except Exception as exc:
+        if strict:
+            raise
         logger.warning("Failed to list Forge projects from GitHub: %s", exc)
         return {}
 
@@ -147,9 +151,11 @@ def _discover_from_github() -> Dict[str, ProjectInfo]:
         # limit (shared across the whole deployment) on nothing.
         if name.startswith(".") or name in skip or name in EXCLUDED_PROJECTS:
             continue
-        if not _has_orchestration_dir(name):
+        if not _has_orchestration_dir(name, strict=strict):
             continue
-        presets, config_keys, has_cli = _load_project_metadata_from_github(name)
+        presets, config_keys, has_cli = _load_project_metadata_from_github(
+            name, strict=strict
+        )
         result[name] = ProjectInfo(
             name=name,
             presets=presets,
@@ -160,7 +166,7 @@ def _discover_from_github() -> Dict[str, ProjectInfo]:
     return result
 
 
-def _has_orchestration_dir(name: str) -> bool:
+def _has_orchestration_dir(name: str, strict: bool = False) -> bool:
     """Whether `projects/<name>/orchestration` exists in the Forge repo.
 
     Fails *open* (assumes it exists) on anything other than a confirmed
@@ -173,14 +179,20 @@ def _has_orchestration_dir(name: str) -> bool:
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return False
+        if strict:
+            raise
         logger.warning("Could not check projects/%s/orchestration: %s", name, exc)
         return True
     except Exception as exc:
+        if strict:
+            raise
         logger.warning("Could not check projects/%s/orchestration: %s", name, exc)
         return True
 
 
-def _load_project_metadata_from_github(name: str) -> Tuple[List[str], List[str], bool]:
+def _load_project_metadata_from_github(
+    name: str, strict: bool = False
+) -> Tuple[List[str], List[str], bool]:
     """Best-effort enrichment for the legacy generic preset form (used as
     a fallback for projects that haven't published a ui/submit.yaml yet).
     Each lookup is independently swallowed on failure — a project should
@@ -190,23 +202,42 @@ def _load_project_metadata_from_github(name: str) -> Tuple[List[str], List[str],
 
     presets: List[str] = []
     try:
-        for preset_file in list_yamls("{}/presets.d".format(base)):
+        preset_files = list_yamls("{}/presets.d".format(base))
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404 and strict:
+            raise
+        preset_files = []
+    except Exception:
+        if strict:
+            raise
+        preset_files = []
+    for preset_file in preset_files:
+        try:
             data = fetch_yaml(preset_file)
             if isinstance(data, dict):
                 presets.extend(data.keys())
-    except Exception:
-        pass
+        except Exception:
+            if strict:
+                raise
 
     config_keys: List[str] = []
     try:
-        for cfg_file in list_yamls("{}/config.d".format(base)):
-            config_keys.append(Path(cfg_file).stem)
+        config_files = list_yamls("{}/config.d".format(base))
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404 and strict:
+            raise
+        config_files = []
     except Exception:
-        pass
+        if strict:
+            raise
+        config_files = []
+    config_keys = [Path(cfg_file).stem for cfg_file in config_files]
 
     try:
         has_cli = path_exists("{}/cli.py".format(base))
     except Exception:
+        if strict:
+            raise
         has_cli = False
 
     return presets, config_keys, has_cli

@@ -187,11 +187,14 @@ async def _archive_job(job: dict) -> None:
             # get pruned, never clobbers good data with an empty/all-
             # Pending result just because the resources are now gone.
             transitioning_into_terminal = previous_phase not in TERMINAL_PHASES
-            if transitioning_into_terminal or not existing_stages:
+            # NULL means a legacy row has never been backfilled. An empty
+            # list means snapshotting was attempted but no Tekton data was
+            # available; do not retry that job on every 60-second full sync.
+            if transitioning_into_terminal or existing_stages is None:
                 new_stages = _compute_terminal_stages(
                     job_name, fields.get("fjob_spec") or {}, fields.get("fjob_status") or {}
                 )
-                fields["stages"] = new_stages if (new_stages or not existing_stages) else existing_stages
+                fields["stages"] = new_stages
             else:
                 fields["stages"] = existing_stages
         # else: job isn't terminal — omit "stages" entirely so upsert_job's
