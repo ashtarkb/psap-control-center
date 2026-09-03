@@ -19,14 +19,10 @@ Both paths go through ``refresh_now()``, which:
   ``pipeline_definitions.py``) — so if two people mash the button at the
   same time, or a button-press lands while the periodic refresh is already
   running, only one round of GitHub calls actually happens.
-- Enforces a server-side minimum interval (``MIN_REFRESH_INTERVAL_SECONDS``)
-  between *completed* refreshes — unlike the in-flight coalescing above,
-  this also throttles *sequential* manual button presses (each of which
-  would otherwise be a brand new round of GitHub calls; a full refresh
-  easily costs 1 project-list call plus several calls per project, which
-  adds up fast against GitHub's 60 req/hr unauthenticated limit shared
-  across the whole deployment). A press inside the cooldown window is a
-  no-op that just returns the last known status.
+- Enforces a server-side minimum interval between successful refreshes and
+  a shorter backoff after failed attempts. This throttles sequential manual
+  button presses as well as concurrent ones, including the failure path where
+  ``last_synced_at`` deliberately does not advance.
 - Never reports success on failure: a failed refresh leaves
   ``last_synced_at`` untouched (so the UI can't claim data is fresh when
   it isn't), records the error, and re-raises so the manual endpoint can
@@ -45,22 +41,19 @@ from typing import List, Optional
 
 from app.core.config import settings
 from app.services import forge_discovery
+from app.services import github_content
 from app.services import pipeline_definitions
 from app.services import project_ui_schema
 
 logger = logging.getLogger(__name__)
 
 # How often the background task runs a refresh, *and* the minimum time
-# that must elapse between any two completed refreshes (manual or
-# periodic) — see refresh_now()'s cooldown check below. One hour leaves
-# room under GitHub's 60 req/hr unauthenticated limit even though
-# a single refresh cycle (project discovery + per-project ui/submit.yaml +
-# pipeline definitions + open PRs) can itself cost several dozen calls on
-# a deployment with more than a handful of Forge projects — if that ever
-# becomes a problem in practice, raise this further (env-tunable via
-# GITHUB_SYNC_INTERVAL_SECONDS below) rather than lowering it.
+# that must elapse between successful refreshes. Repository discovery is
+# consolidated into one shared Git Trees snapshot, while a shorter failure
+# backoff prevents manual retries from hammering GitHub during an outage.
 PERIODIC_INTERVAL_SECONDS = settings.GITHUB_SYNC_INTERVAL_SECONDS
 MIN_REFRESH_INTERVAL_SECONDS = PERIODIC_INTERVAL_SECONDS
+FAILED_REFRESH_BACKOFF_SECONDS = settings.GITHUB_SYNC_FAILURE_BACKOFF_SECONDS
 
 _status = {
     "in_progress": False,
@@ -98,9 +91,21 @@ async def _do_refresh() -> dict:
     logger.info("GitHub sync: starting")
     errors: List[str] = []
 
+    # Resolve the target commit and recursive tree once. All directory/path
+    # discovery below is then local, and YAML files are downloaded from the
+    # immutable raw commit rather than spending one REST request per path.
+    snapshot_ready = True
     try:
-        projects = await asyncio.to_thread(
-            forge_discovery.discover_projects, True, True
+        await asyncio.to_thread(github_content.refresh_snapshot)
+    except Exception as exc:
+        errors.append("repository snapshot: {}".format(exc))
+        snapshot_ready = False
+
+    try:
+        projects = (
+            await asyncio.to_thread(forge_discovery.discover_projects, True, True)
+            if snapshot_ready
+            else []
         )
     except Exception as exc:
         errors.append("project discovery: {}".format(exc))
@@ -108,10 +113,11 @@ async def _do_refresh() -> dict:
 
     # Pipeline definitions (Tekton Pipeline CRDs) — one shared refresh, not
     # per-project.
-    try:
-        await pipeline_definitions.refresh_all()
-    except Exception as exc:
-        errors.append("pipeline definitions: {}".format(exc))
+    if snapshot_ready:
+        try:
+            await pipeline_definitions.refresh_all()
+        except Exception as exc:
+            errors.append("pipeline definitions: {}".format(exc))
 
     # Each project's ui/submit.yaml — sequential on purpose (this whole
     # module exists to stay under GitHub's rate limit, so no point firing
@@ -181,9 +187,32 @@ async def refresh_now() -> dict:
         # HTTP caller; every waiter receives the same public status result.
         return await asyncio.shield(_inflight)
 
+    now = datetime.now(timezone.utc)
     last_synced = _status["last_synced_at"]
-    if last_synced is not None:
-        elapsed = (datetime.now(timezone.utc) - last_synced).total_seconds()
+    last_attempted = _status["last_attempted_at"]
+
+    previous_attempt_failed = (
+        last_attempted is not None
+        and (last_synced is None or last_attempted > last_synced)
+        and _status["last_error"] is not None
+    )
+    if previous_attempt_failed:
+        elapsed = (now - last_attempted).total_seconds()
+        if elapsed < FAILED_REFRESH_BACKOFF_SECONDS:
+            retry_after = max(1, int(FAILED_REFRESH_BACKOFF_SECONDS - elapsed))
+            logger.debug(
+                "GitHub sync: suppressing retry for %ds after failed attempt",
+                retry_after,
+            )
+            # Preserve the non-2xx contract for failed refreshes: this is a
+            # throttled retry of the same failure, not a successful no-op.
+            raise GithubSyncError(
+                ["previous refresh failed; retry in {}s: {}".format(
+                    retry_after, _status["last_error"]
+                )]
+            )
+    elif last_synced is not None:
+        elapsed = (now - last_synced).total_seconds()
         if elapsed < MIN_REFRESH_INTERVAL_SECONDS:
             logger.debug(
                 "GitHub sync: skipping refresh (%.0fs since last success, "
@@ -194,7 +223,7 @@ async def refresh_now() -> dict:
             return get_status()
 
     _status["in_progress"] = True
-    _status["last_attempted_at"] = datetime.now(timezone.utc)
+    _status["last_attempted_at"] = now
     future = asyncio.ensure_future(_run_refresh())
     _inflight = future
     return await asyncio.shield(future)
