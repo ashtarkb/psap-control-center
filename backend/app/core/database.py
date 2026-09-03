@@ -74,6 +74,7 @@ _MIGRATIONS = [
     ("clusters", "infra_id", "VARCHAR(100)"),
     ("instance_type_rates", "is_estimated", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ("fournos_jobs", "is_lock", "BOOLEAN NOT NULL DEFAULT FALSE"),
+    ("fournos_jobs", "stages", "JSONB"),
 ]
 
 
@@ -104,6 +105,29 @@ async def _run_migrations(conn):
                 raise
 
     await _migrate_cluster_costs_multi_month(conn, is_pg)
+    await _create_missing_indexes(conn)
+
+
+# Indexes added after the tables already existed in deployed DBs — plain
+# `Base.metadata.create_all` only creates missing *tables*, not indexes on
+# existing ones, so these need to be created explicitly (and idempotently,
+# via IF NOT EXISTS which both sqlite and postgres support).
+_INDEXES = [
+    ("ix_fournos_jobs_completed", "fournos_jobs", "completed_at"),
+    ("ix_fournos_jobs_trigger_type", "fournos_jobs", "trigger_type"),
+    ("ix_fournos_jobs_history", "fournos_jobs", "status, is_lock, trigger_type, completed_at"),
+]
+
+
+async def _create_missing_indexes(conn):
+    for index_name, table, columns in _INDEXES:
+        try:
+            await conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({columns})"
+            ))
+        except (OperationalError, ProgrammingError) as e:
+            logger.error(f"Index creation failed for {index_name}: {e}")
+            raise
 
 
 async def _migrate_cluster_costs_multi_month(conn, is_pg: bool):

@@ -302,3 +302,17 @@ class GitHubPR(BaseModel):
     head_sha: str
     branch: str
     draft: bool = False
+
+
+# -- GitHub sync status --
+#
+# Everything sourced from the Forge GitHub repo (project discovery,
+# ui/submit.yaml schemas, pipeline definitions, open PRs) is refreshed on
+# one shared schedule/lock (see github_sync_service.py) instead of on every
+# page load, to stay well under GitHub's unauthenticated 60 req/hr limit.
+
+class GithubSyncStatusResponse(BaseModel):
+    in_progress: bool = False
+    last_synced_at: Optional[str] = None
+    last_error: Optional[str] = None
+    project_count: int = 0

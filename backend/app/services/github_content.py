@@ -4,6 +4,10 @@ Forge (`openshift-psap/forge`) is a public open-source repository, so this
 always reads through the public, unauthenticated GitHub contents API — no
 local checkout fallback and no token. Shared by any project plugin that
 needs to pull its preset definitions from the Forge repository at runtime.
+
+Staying unauthenticated (60 req/hr, shared across the whole deployment) is
+fine as long as callers cache aggressively and only hit GitHub through the
+periodic/manual refresh in ``github_sync_service.py`` — see that module.
 """
 
 from __future__ import annotations

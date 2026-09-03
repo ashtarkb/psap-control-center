@@ -50,7 +50,8 @@ import {
   useDeleteClusterLock,
   useCreateClusterLock,
   useGithubPRs,
-  useRefreshGithubPRs,
+  useGithubSyncStatus,
+  useRefreshGithubSync,
   useProjectUiSchema,
   useRefreshProjectUiSchema,
   useClusterOverview,
@@ -369,7 +370,8 @@ function SubmitForm({ onSubmitted }: { onSubmitted?: (name: string) => void }) {
   const { data: projects } = useForgeProjects()
   const { data: pipelines } = usePipelines()
   const { data: githubPRs } = useGithubPRs()
-  const refreshGithubPRs = useRefreshGithubPRs()
+  const { data: githubSyncStatus } = useGithubSyncStatus()
+  const refreshGithubSync = useRefreshGithubSync()
   const submitJob = useSubmitJob()
 
   // "Basics" — common to every project, owned here so there is exactly one
@@ -800,16 +802,26 @@ function SubmitForm({ onSubmitted }: { onSubmitted?: (name: string) => void }) {
           <div className="relative">
             <div className="flex items-center justify-between">
               <label className="block text-sm font-medium text-gray-700">Pull Request (optional)</label>
-              <button
-                type="button"
-                onClick={() => refreshGithubPRs.mutate()}
-                disabled={refreshGithubPRs.isPending}
-                className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
-                title="Re-fetch open PRs from GitHub"
-              >
-                <ArrowPathIcon className={clsx('h-3.5 w-3.5', refreshGithubPRs.isPending && 'animate-spin')} />
-                Refresh
-              </button>
+              <div className="flex items-center gap-2">
+                {githubSyncStatus?.last_synced_at && (
+                  <span
+                    className="text-[11px] text-gray-400"
+                    title="Projects, submit-form presets, and open PRs are all synced from GitHub on this schedule (plus this manual button) — not on every page load, to stay well under GitHub's rate limit."
+                  >
+                    GitHub data synced {formatAge(githubSyncStatus.last_synced_at)} ago
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => (githubSyncStatus?.in_progress || refreshGithubSync.isPending ? undefined : refreshGithubSync.mutate())}
+                  disabled={refreshGithubSync.isPending || githubSyncStatus?.in_progress}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
+                  title="Re-sync projects, presets, pipeline definitions, and open PRs from GitHub — shared across everyone, so if someone else just clicked this it won't fire a second request"
+                >
+                  <ArrowPathIcon className={clsx('h-3.5 w-3.5', (refreshGithubSync.isPending || githubSyncStatus?.in_progress) && 'animate-spin')} />
+                  {githubSyncStatus?.in_progress ? 'Syncing…' : 'Refresh GitHub data'}
+                </button>
+              </div>
             </div>
             <input
               type="text"

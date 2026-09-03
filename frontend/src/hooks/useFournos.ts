@@ -12,6 +12,7 @@ import type {
   CreateClusterLockRequest,
   ForgeProject,
   GitHubPR,
+  GithubSyncStatus,
   SlotHold,
   SubmitJobRequest,
   SubmitJobResponse,
@@ -278,6 +279,39 @@ export function useRefreshGithubPRs() {
     },
     onError: (error: Error) => {
       toast.error(`Failed to refresh PRs from GitHub: ${error.message}`)
+    },
+  })
+}
+
+// ─── GitHub sync status/refresh ────────────────────────────────────────
+//
+// Everything sourced from the Forge GitHub repo (projects, ui/submit.yaml
+// schemas, pipeline definitions, open PRs) is refreshed on one shared
+// 5-min schedule server-side (github_sync_service.py) rather than on every
+// page load. This just surfaces that status + a manual "Refresh now" button.
+
+export function useGithubSyncStatus() {
+  return useQuery<GithubSyncStatus>({
+    queryKey: ['github-sync-status'],
+    queryFn: () => fournosApi.getGithubSyncStatus(),
+    refetchInterval: 30000,
+  })
+}
+
+export function useRefreshGithubSync() {
+  const qc = useQueryClient()
+  return useMutation<GithubSyncStatus, Error>({
+    mutationFn: () => fournosApi.refreshGithubSync(),
+    onSuccess: (data) => {
+      qc.setQueryData(['github-sync-status'], data)
+      // Every GitHub-sourced cache may have changed — let the relevant
+      // views pick up fresh data on next read.
+      qc.invalidateQueries({ queryKey: ['forge-projects'] })
+      qc.invalidateQueries({ queryKey: ['project-ui-schema'] })
+      qc.invalidateQueries({ queryKey: ['github-prs'] })
+    },
+    onError: (error: Error) => {
+      toast.error(`GitHub sync failed: ${error.message}`)
     },
   })
 }

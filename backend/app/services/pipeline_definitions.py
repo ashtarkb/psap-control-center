@@ -111,3 +111,45 @@ async def refresh_all() -> Dict[str, dict]:
 async def get_definition(pipeline_name: str) -> Optional[dict]:
     defs = await get_all()
     return defs.get(pipeline_name)
+
+
+def merge_pipeline_stages(pipeline_def: Optional[dict], actual_stages: list) -> list:
+    """Overlay real per-task status (from whatever TaskRuns Tekton has
+    created so far) onto a pipeline's full, predefined task order — so the
+    Pipeline Timeline shows every step a job *will* run, not just the ones
+    that happen to have started already. Falls back to `actual_stages`
+    as-is if the pipeline isn't one we have a definition for.
+
+    Shared by the live job-detail endpoint (``api/fournos.py``) and the
+    watcher (``fournos_watcher.py``), which snapshots the merged stage list
+    into the DB at the moment a job reaches a terminal phase so the History
+    tab can show the full pipeline — including exactly which step failed —
+    for jobs whose pods/PipelineRun are long gone from the cluster.
+    """
+    if not pipeline_def:
+        return actual_stages
+
+    actual_by_name = {s["name"]: s for s in actual_stages}
+
+    def _pending(name: str, is_finally: bool) -> dict:
+        return {
+            "name": name,
+            "displayName": name.replace("-", " ").title(),
+            "status": "Pending",
+            "startTime": None,
+            "completionTime": None,
+            "finally": is_finally,
+        }
+
+    merged = [
+        actual_by_name.get(name) or _pending(name, False)
+        for name in pipeline_def.get("tasks", [])
+    ]
+    merged += [
+        actual_by_name.get(name) or _pending(name, True)
+        for name in pipeline_def.get("finally", [])
+    ]
+
+    known = set(pipeline_def.get("tasks", [])) | set(pipeline_def.get("finally", []))
+    merged += [s for s in actual_stages if s["name"] not in known]
+    return merged

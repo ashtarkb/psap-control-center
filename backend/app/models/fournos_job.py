@@ -38,6 +38,14 @@ class FournosJob(Base):
     tags = Column(ARRAY(String), default=list)
     fjob_spec = Column(JSONB, default=dict)
     fjob_status = Column(JSONB, default=dict)
+    # Snapshot of the merged pipeline stage list (same shape the live
+    # job-detail endpoint builds via pipeline_definitions.merge_pipeline_
+    # stages) taken at the moment the job reached a terminal phase — the
+    # PipelineRun/TaskRuns themselves are gone from the cluster by the time
+    # a job shows up in History, so this is the only place that data still
+    # exists. Lets the History tab render the full Pipeline Timeline,
+    # including exactly which step failed.
+    stages = Column(JSONB, default=list)
     error_message = Column(Text, default="")
     triggered_by_schedule = Column(String(255), nullable=True, index=True)
     trigger_type = Column(String(50), default="manual")
@@ -55,6 +63,20 @@ class FournosJob(Base):
 
     __table_args__ = (
         Index("ix_fournos_jobs_created", "created_at"),
+        # History tab defaults to sorting by completed_at (most recently
+        # finished first) and always filters on status/is_lock/trigger_type
+        # — without an index on completed_at, that ORDER BY forces a full
+        # table scan + filesort that gets slower as history grows.
+        Index("ix_fournos_jobs_completed", "completed_at"),
+        Index("ix_fournos_jobs_trigger_type", "trigger_type"),
+        # Composite index matching the History query's WHERE + ORDER BY
+        # shape (status IN (...) AND is_lock = false AND trigger_type != ...
+        # ORDER BY completed_at DESC) so it can be satisfied with an index
+        # scan instead of a scan over the whole table.
+        Index(
+            "ix_fournos_jobs_history",
+            "status", "is_lock", "trigger_type", "completed_at",
+        ),
     )
 
     def __repr__(self):

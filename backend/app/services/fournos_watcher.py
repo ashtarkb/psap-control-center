@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.config import settings
 from app.services import fournos_k8s_client as k8s_client
 from app.services import fournos_db_service as db_svc
+from app.services import pipeline_definitions
 from app.models.fournos_job import FournosJob
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,33 @@ def _init_watcher_db(loop: asyncio.AbstractEventLoop) -> None:
         class_=AsyncSession,
         expire_on_commit=False,
     )
+
+
+def _compute_terminal_stages(job_name: str, spec: dict, status: dict) -> list:
+    """Snapshot the merged pipeline stage list for a job that just reached
+    a terminal phase — this is the *last* moment the PipelineRun/TaskRuns
+    are guaranteed to still exist in the cluster, so it's the only chance
+    to capture "which step failed" before the job (and its resources) get
+    cleaned up and it becomes a plain history row.
+    """
+    try:
+        pr_name = status.get("pipelineRun", "")
+        pr = k8s_client.get_pipelinerun(pr_name) if pr_name else None
+        if not pr:
+            prs = k8s_client.list_pipelineruns_for_job(job_name)
+            pr = prs[0] if prs else None
+        stages = k8s_client.extract_pipeline_stages(pr) if pr else []
+
+        pipeline_name = spec.get("pipeline", "")
+        if pipeline_name:
+            pipeline_def = pipeline_definitions.get_definition_sync(pipeline_name)
+            stages = pipeline_definitions.merge_pipeline_stages(pipeline_def, stages)
+        return stages
+    except Exception as exc:
+        logger.warning(
+            "Could not snapshot pipeline stages for %s: %s", job_name, exc
+        )
+        return []
 
 
 def _extract_forge_fields(job: dict) -> dict:
@@ -99,18 +127,27 @@ def _extract_forge_fields(job: dict) -> dict:
     else:
         trigger_type = "manual"
 
+    job_name = meta.get("name", "")
+    phase = status.get("phase", "Unknown")
+    stages = (
+        _compute_terminal_stages(job_name, spec, status)
+        if phase in TERMINAL_PHASES
+        else []
+    )
+
     return {
-        "name": meta.get("name", ""),
+        "name": job_name,
         "project": forge.get("project", ""),
         "preset": preset,
         "cluster": spec.get("cluster", ""),
         "pipeline": spec.get("pipeline", ""),
         "owner": spec.get("owner", ""),
-        "status": status.get("phase", "Unknown"),
+        "status": phase,
         "message": status.get("message", ""),
         "created_at": created_at,
         "completed_at": completed_at,
         "duration_seconds": duration_seconds,
+        "stages": stages,
         "mlflow_url": mlflow_url,
         "config_overrides": forge.get("configOverrides", {}),
         "fjob_spec": spec,

@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     FORGE_PROJECTS_CONFIG_PATH: str = "/etc/fournos-dashboard/projects.yaml"
     FORGE_GITHUB_REPO: str = "openshift-psap/forge"
 
-    FOURNOS_DEFAULT_PIPELINES: str = "forge-full,forge-prepare-test,forge-test-only,forge-prepare-only,forge-replot"
+    FOURNOS_DEFAULT_PIPELINES: str = "forge-full,forge-prepare-test,forge-test-only,forge-prepare-only,forge-replot,nightly"
 
     class Config:
         env_file = ".env"

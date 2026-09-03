@@ -622,6 +622,13 @@ export interface GitHubPR {
   draft: boolean
 }
 
+export interface GithubSyncStatus {
+  in_progress: boolean
+  last_synced_at: string | null
+  last_error: string | null
+  project_count: number
+}
+
 export interface SubmitJobRequest {
   project: string
   cluster: string

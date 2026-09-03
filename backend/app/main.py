@@ -210,6 +210,10 @@ async def lifespan(app: FastAPI):
     refresh_task = asyncio.create_task(cluster_refresh_task())
     logger.info("Cluster auto-refresh task started (every 10 min)")
 
+    from app.services.github_sync_service import periodic_refresh_task
+    github_sync_task = asyncio.create_task(periodic_refresh_task())
+    logger.info("GitHub sync task started (every 5 min)")
+
     # Start fournos job watcher (best-effort)
     try:
         from app.services.fournos_watcher import start_watcher as start_fournos_watcher
@@ -234,7 +238,8 @@ async def lifespan(app: FastAPI):
     # Cleanup
     status_task.cancel()
     refresh_task.cancel()
-    for t in (status_task, refresh_task):
+    github_sync_task.cancel()
+    for t in (status_task, refresh_task, github_sync_task):
         try:
             await t
         except asyncio.CancelledError:

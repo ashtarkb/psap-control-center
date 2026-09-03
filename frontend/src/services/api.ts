@@ -544,6 +544,16 @@ export const fournosApi = {
     return data
   },
 
+  getGithubSyncStatus: async () => {
+    const { data } = await api.get('/fournos/github/sync-status')
+    return data
+  },
+
+  refreshGithubSync: async () => {
+    const { data } = await api.post('/fournos/github/sync')
+    return data
+  },
+
   submitMatrix: async (req: import('../types').SubmitMatrixRequest) => {
     const { data } = await api.post('/fournos/submit-matrix', req)
     return data

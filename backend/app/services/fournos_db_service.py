@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.fournos_job import FournosJob, FournosJobEvent
 
 logger = logging.getLogger(__name__)
@@ -91,39 +92,58 @@ async def list_jobs(
     limit: int = 50,
     offset: int = 0,
 ) -> Tuple[Sequence[FournosJob], int]:
-    stmt = select(FournosJob).where(
+    filters = [
         FournosJob.status.in_(TERMINAL_STATUSES),
         FournosJob.is_lock.is_(False),
         FournosJob.trigger_type != "recurring-parent",
-    )
-    count_stmt = select(func.count(FournosJob.id)).where(
-        FournosJob.status.in_(TERMINAL_STATUSES),
-        FournosJob.is_lock.is_(False),
-        FournosJob.trigger_type != "recurring-parent",
-    )
-
+    ]
     if project:
-        stmt = stmt.where(FournosJob.project == project)
-        count_stmt = count_stmt.where(FournosJob.project == project)
+        filters.append(FournosJob.project == project)
     if cluster:
-        stmt = stmt.where(FournosJob.cluster == cluster)
-        count_stmt = count_stmt.where(FournosJob.cluster == cluster)
+        filters.append(FournosJob.cluster == cluster)
     if status:
-        stmt = stmt.where(FournosJob.status == status)
-        count_stmt = count_stmt.where(FournosJob.status == status)
+        filters.append(FournosJob.status == status)
     if owner:
-        stmt = stmt.where(FournosJob.owner == owner)
-        count_stmt = count_stmt.where(FournosJob.owner == owner)
+        filters.append(FournosJob.owner == owner)
     if created_after:
-        stmt = stmt.where(FournosJob.created_at >= created_after)
-        count_stmt = count_stmt.where(FournosJob.created_at >= created_after)
+        filters.append(FournosJob.created_at >= created_after)
     if created_before:
-        stmt = stmt.where(FournosJob.created_at <= created_before)
-        count_stmt = count_stmt.where(FournosJob.created_at <= created_before)
+        filters.append(FournosJob.created_at <= created_before)
 
     sort_col = _SORT_COLUMNS.get(sort_by or "date", FournosJob.completed_at)
     order_by = sort_col.asc() if sort_dir == "asc" else sort_col.desc()
-    stmt = stmt.order_by(order_by).limit(limit).offset(offset)
+
+    is_pg = settings.DATABASE_URL.startswith("postgresql")
+    if is_pg:
+        # Postgres: get the page of rows and the total count in a single
+        # query via a window function, instead of running the same
+        # filtered query twice (once for rows, once for COUNT(*)).
+        stmt = (
+            select(FournosJob, func.count().over().label("total_count"))
+            .where(*filters)
+            .order_by(order_by)
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await session.execute(stmt)
+        rows = result.all()
+        jobs = [row[0] for row in rows]
+        total = rows[0].total_count if rows else 0
+        if not rows and offset == 0:
+            total = 0
+        elif not rows:
+            # Page beyond the last row — window function can't tell us the
+            # total, so fall back to a plain count for this edge case.
+            count_result = await session.execute(
+                select(func.count(FournosJob.id)).where(*filters)
+            )
+            total = count_result.scalar() or 0
+        return jobs, total
+
+    # SQLite (and any other non-window-function-friendly backend): fall
+    # back to the original two-query approach.
+    stmt = select(FournosJob).where(*filters).order_by(order_by).limit(limit).offset(offset)
+    count_stmt = select(func.count(FournosJob.id)).where(*filters)
 
     result = await session.execute(stmt)
     jobs = result.scalars().all()
