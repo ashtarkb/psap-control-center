@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from app.services import github_sync_service
+from app.services import github_content
 from app.services import pipeline_definitions
 from app.services import project_ui_schema
 
@@ -47,6 +48,97 @@ def test_concurrent_refresh_callers_receive_complete_status(monkeypatch):
         assert first_status["in_progress"] is False
 
     asyncio.run(scenario())
+
+
+def test_failed_refresh_attempts_are_backed_off(monkeypatch):
+    async def scenario():
+        calls = 0
+
+        async def fail_refresh():
+            nonlocal calls
+            calls += 1
+            raise github_sync_service.GithubSyncError(["rate limited"])
+
+        monkeypatch.setattr(github_sync_service, "_do_refresh", fail_refresh)
+        monkeypatch.setattr(github_sync_service, "_inflight", None)
+        monkeypatch.setattr(github_sync_service, "FAILED_REFRESH_BACKOFF_SECONDS", 300)
+        monkeypatch.setattr(
+            github_sync_service,
+            "_status",
+            {
+                "in_progress": False,
+                "last_synced_at": None,
+                "last_attempted_at": None,
+                "last_error": None,
+                "project_count": 0,
+            },
+        )
+
+        with pytest.raises(github_sync_service.GithubSyncError, match="rate limited"):
+            await github_sync_service.refresh_now()
+        with pytest.raises(
+            github_sync_service.GithubSyncError, match="previous refresh failed"
+        ):
+            await github_sync_service.refresh_now()
+
+        assert calls == 1
+        assert github_sync_service._status["last_synced_at"] is None
+        assert github_sync_service._status["last_attempted_at"] is not None
+
+    asyncio.run(scenario())
+
+
+def test_repository_tree_snapshot_serves_directory_lookups_locally(monkeypatch):
+    api_calls = []
+
+    def fake_api_json(endpoint):
+        api_calls.append(endpoint)
+        if endpoint.startswith("commits/"):
+            return {"sha": "abc123"}
+        return {
+            "truncated": False,
+            "tree": [
+                {"path": "projects", "type": "tree"},
+                {"path": "projects/demo", "type": "tree"},
+                {"path": "projects/demo/orchestration", "type": "tree"},
+                {"path": "projects/demo/orchestration/presets.d", "type": "tree"},
+                {
+                    "path": "projects/demo/orchestration/presets.d/default.yaml",
+                    "type": "blob",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(github_content, "_snapshot", None)
+    monkeypatch.setattr(github_content, "_api_json", fake_api_json)
+
+    snapshot = github_content.refresh_snapshot()
+
+    assert snapshot.commit_sha == "abc123"
+    assert github_content.list_dirs("projects") == ["demo"]
+    assert github_content.path_exists("projects/demo/orchestration") is True
+    assert github_content.path_exists("projects/missing/orchestration") is False
+    assert github_content.list_yamls(
+        "projects/demo/orchestration/presets.d"
+    ) == ["projects/demo/orchestration/presets.d/default.yaml"]
+    assert api_calls == ["commits/main", "git/trees/abc123?recursive=1"]
+
+
+def test_failed_tree_refresh_preserves_previous_snapshot(monkeypatch):
+    previous = github_content.RepositorySnapshot(
+        commit_sha="previous", entries={"projects": "tree"}
+    )
+    monkeypatch.setattr(github_content, "_snapshot", previous)
+
+    def fail_load():
+        raise RuntimeError("GitHub unavailable")
+
+    monkeypatch.setattr(github_content, "_load_snapshot", fail_load)
+
+    with pytest.raises(RuntimeError, match="GitHub unavailable"):
+        github_content.refresh_snapshot()
+
+    assert github_content._snapshot is previous
 
 
 def test_pipeline_refresh_failure_preserves_cached_definitions(monkeypatch):

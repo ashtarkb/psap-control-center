@@ -919,9 +919,13 @@ def _fetch_github_open_prs_sync() -> list:
         "https://api.github.com/repos/{}/pulls"
         "?state=open&per_page=100"
     ).format(settings.FORGE_GITHUB_REPO)
-    req = urllib.request.Request(
-        url, headers={"Accept": "application/vnd.github+json"}
-    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "psap-control-center",
+    }
+    if settings.GITHUB_TOKEN:
+        headers["Authorization"] = "Bearer {}".format(settings.GITHUB_TOKEN)
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=10) as resp:
         prs = json.loads(resp.read())
 
