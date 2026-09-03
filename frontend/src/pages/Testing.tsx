@@ -1384,7 +1384,7 @@ export default function Testing() {
     return { historyStartUtc: startUtc, historyEndUtc: endUtc }
   }, [activeTab, historyDate, historyFromTime, historyToTime, tz])
 
-  const { data: jobsData, isLoading, refetch } = useFournosJobs({
+  const { data: jobsData, isLoading, isError, error, refetch } = useFournosJobs({
     tab: activeTab === 'live' || activeTab === 'history' ? activeTab : undefined,
     project: filterProject || undefined,
     cluster: filterCluster || undefined,
@@ -1540,7 +1540,25 @@ export default function Testing() {
         </div>
       ) : (
       <div className="card">
-        {activeTab === 'live' && (
+        {(activeTab === 'live' || activeTab === 'history') && isError && (
+          <div className="text-center py-12 px-4">
+            <p className="font-medium text-red-700">
+              Failed to load {activeTab === 'live' ? 'live jobs' : 'job history'}
+            </p>
+            <p className="mt-1 text-sm text-gray-500">
+              {error instanceof Error ? error.message : 'The server did not respond.'}
+            </p>
+            <button
+              type="button"
+              onClick={() => refetch()}
+              className="mt-4 inline-flex items-center gap-1 rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            >
+              <ArrowPathIcon className="h-4 w-4" /> Retry
+            </button>
+          </div>
+        )}
+
+        {activeTab === 'live' && !isError && (
           isLoading ? (
             <div className="text-center py-12 text-gray-400">Loading live jobs...</div>
           ) : (
@@ -1563,7 +1581,7 @@ export default function Testing() {
           )
         )}
 
-        {activeTab === 'history' && (
+        {activeTab === 'history' && !isError && (
           isLoading ? (
             <div className="text-center py-12 text-gray-400">Loading history...</div>
           ) : (

@@ -7,7 +7,9 @@ data:
     #!/bin/sh
 
     # Polls Quay.io for new image digests and restarts the corresponding
-    # OCP deployment when a change is detected. Run as a CronJob (see
+    # OCP deployment when a change is detected. The last successfully
+    # deployed digest is stored on the Deployment itself so it survives
+    # the short-lived CronJob pod. Run as a CronJob (see
     # image-updater-cronjob.yaml).
     #
     # Environment variables:
@@ -15,7 +17,10 @@ data:
     #   HTTPS_PROXY       — forward proxy for reaching quay.io (if needed)
     #   NO_PROXY          — bypass proxy for internal cluster traffic
 
-    NAMESPACE="${NAMESPACE:-psap-control-center}"
+    # Never guess a target namespace or tag. A partially configured updater
+    # must fail closed instead of touching the wrong environment.
+    NAMESPACE="${NAMESPACE:?NAMESPACE must be set}"
+    IMAGE_TAG="${IMAGE_TAG:?IMAGE_TAG must be set}"
 
     get_remote_digest() {
       REPO="$1"
@@ -33,29 +38,41 @@ data:
       DEPLOY="$1"
       REPO="$2"
       TAG="$3"
-      DIGEST_FILE="/tmp/${DEPLOY}-last-digest"
 
       REMOTE_DIGEST=$(get_remote_digest "$REPO" "$TAG")
       if [ -z "$REMOTE_DIGEST" ]; then
         echo "WARN: Could not fetch remote digest for ${REPO}:${TAG}"
-        return
+        return 1
       fi
 
-      LAST_DIGEST=""
-      if [ -f "$DIGEST_FILE" ]; then
-        LAST_DIGEST=$(cat "$DIGEST_FILE")
+      # CronJob pods are ephemeral, so /tmp cannot retain state between
+      # checks. Deployment metadata is persistent and the existing RBAC
+      # already grants get/patch access to it.
+      if ! LAST_DIGEST=$(kubectl get deployment/"$DEPLOY" -n "$NAMESPACE" \
+        -o go-template='{{with .metadata.annotations}}{{index . "psap-control-center.io/image-digest"}}{{end}}'); then
+        echo "ERROR: Could not read deployed digest for $DEPLOY"
+        return 1
       fi
 
       if [ "$REMOTE_DIGEST" != "$LAST_DIGEST" ]; then
         echo "NEW IMAGE detected for $DEPLOY: $REMOTE_DIGEST (was: ${LAST_DIGEST:-none})"
-        kubectl rollout restart deployment/"$DEPLOY" -n "$NAMESPACE"
-        echo "$REMOTE_DIGEST" > "$DIGEST_FILE"
+        if ! kubectl rollout restart deployment/"$DEPLOY" -n "$NAMESPACE"; then
+          echo "ERROR: Could not restart $DEPLOY"
+          return 1
+        fi
+        if ! kubectl annotate deployment/"$DEPLOY" -n "$NAMESPACE" \
+          "psap-control-center.io/image-digest=$REMOTE_DIGEST" --overwrite; then
+          echo "ERROR: Could not persist deployed digest for $DEPLOY"
+          return 1
+        fi
       else
         echo "No change for $DEPLOY ($REMOTE_DIGEST)"
       fi
     }
 
     echo "=== Image update check: $(date) ==="
-    check_and_restart "psap-control-center-backend" "redhat-performance/psap-control-center-backend" "${IMAGE_TAG:-latest}"
-    check_and_restart "psap-control-center-frontend" "redhat-performance/psap-control-center-frontend" "${IMAGE_TAG:-latest}"
+    FAILED=0
+    check_and_restart "psap-control-center-backend" "redhat-performance/psap-control-center-backend" "$IMAGE_TAG" || FAILED=1
+    check_and_restart "psap-control-center-frontend" "redhat-performance/psap-control-center-frontend" "$IMAGE_TAG" || FAILED=1
     echo "=== Done ==="
+    exit "$FAILED"
