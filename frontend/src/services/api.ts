@@ -414,7 +414,10 @@ export const fournosApi = {
     page?: number
     per_page?: number
   } = {}) => {
-    const { data } = await api.get('/fournos/jobs', { params })
+    // Some managed browser profiles cancel requests containing `/jobs`
+    // before they reach the server. `/runs` is a backward-compatible alias
+    // for the same list handler; job-specific APIs retain their existing URLs.
+    const { data } = await api.get('/fournos/runs', { params })
     return data
   },
 

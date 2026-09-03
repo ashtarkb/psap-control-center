@@ -40,6 +40,7 @@ export function useFournosJobs(params: {
     queryKey: ['fournos-jobs', params],
     queryFn: () => fournosApi.listJobs(params),
     refetchInterval: params.tab === 'live' ? 5000 : false,
+    retry: 1,
   })
 }
 

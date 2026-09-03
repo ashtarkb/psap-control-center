@@ -140,6 +140,11 @@ oc set volume deployment/psap-control-center-backend \
   --add --name=kubeconfigs --mount-path=/app/kubeconfigs \
   --claim-name=psap-control-center-kubeconfigs
 
+# Both backend volumes are ReadWriteOnce. Recreate prevents a rolling update
+# from blocking while the replacement pod tries to attach volumes still in use.
+oc patch deployment psap-control-center-backend --type=merge \
+  -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+
 oc expose deployment psap-control-center-backend --port=8000
 ```
 
@@ -196,7 +201,9 @@ supported side-by-side on the same cluster:
    pushes them to Quay.io with the appropriate tag.
 2. **OCP CronJob** (runs every 2 minutes) polls Quay for new image digests.
    When a change is detected, it triggers `kubectl rollout restart` for the
-   corresponding deployment.
+   corresponding deployment. The last successfully deployed digest is kept in
+   the `psap-control-center.io/image-digest` Deployment annotation so it
+   persists across the CronJob's short-lived pods.
 3. **Total time from push to live:** ~4–6 minutes.
 
 ### GitHub Actions workflows
@@ -239,6 +246,10 @@ oc apply -n <namespace> -f deploy/ocp/image-updater-cronjob.yaml
 ```bash
 # Check CronJob status
 oc get cronjob image-updater -n <namespace>
+
+# Confirm the persistent digest recorded for each deployment
+oc get deployment -n <namespace> \
+  -o custom-columns=NAME:.metadata.name,DIGEST:.metadata.annotations.psap-control-center\\.io/image-digest
 
 # View the latest job's logs
 oc logs -n <namespace> job/$(oc get jobs -n <namespace> \

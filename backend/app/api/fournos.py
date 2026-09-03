@@ -279,6 +279,9 @@ _LIVE_SORT_KEYS = {
 # ─── routes: jobs ────────────────────────────────────────────────────────
 
 @router.get("/jobs", response_model=JobListResponse)
+@router.get("/jobs/", response_model=JobListResponse, include_in_schema=False)
+@router.get("/runs", response_model=JobListResponse)
+@router.get("/runs/", response_model=JobListResponse, include_in_schema=False)
 async def list_jobs(
     tab: str = Query("live", regex="^(live|history)$"),
     project: str = Query(""),
