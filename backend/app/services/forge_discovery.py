@@ -141,7 +141,11 @@ def _discover_from_github() -> Dict[str, ProjectInfo]:
 
     result: Dict[str, ProjectInfo] = {}
     for name in names:
-        if name.startswith(".") or name in skip:
+        # Check EXCLUDED_PROJECTS *before* making any per-project GitHub
+        # calls below — these are thrown away regardless, so fetching
+        # their metadata first only wastes GitHub's unauthenticated rate
+        # limit (shared across the whole deployment) on nothing.
+        if name.startswith(".") or name in skip or name in EXCLUDED_PROJECTS:
             continue
         if not _has_orchestration_dir(name):
             continue
