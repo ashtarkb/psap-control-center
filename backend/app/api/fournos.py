@@ -975,11 +975,14 @@ async def github_open_prs_refresh(_=Depends(require_auth)):
 
 # ─── routes: GitHub sync status/refresh ─────────────────────────────────
 #
-# Manual counterpart to github_sync_service's periodic (every 5 min)
+# Manual counterpart to github_sync_service's periodic (every 30 min)
 # refresh — lets a user force an immediate update (e.g. right after
-# merging a new preset) instead of waiting out the interval. Goes through
-# the exact same coalesced refresh_now(), so simultaneous button presses
-# from multiple people collapse into a single round of GitHub calls.
+# merging a new preset) instead of waiting out the interval, subject to
+# the same server-side cooldown (so it can't be spammed into exhausting
+# GitHub's rate limit). Goes through the exact same coalesced
+# refresh_now(), so simultaneous button presses from multiple people
+# collapse into a single round of GitHub calls, and a failed refresh
+# comes back as a real error (502) instead of a false "ok".
 
 @router.get("/github/sync-status", response_model=GithubSyncStatusResponse)
 async def github_sync_status():
@@ -995,7 +998,16 @@ async def github_sync_status():
 
 @router.post("/github/sync", response_model=GithubSyncStatusResponse)
 async def github_sync_refresh(_=Depends(require_auth)):
-    status = await github_sync_service.refresh_now()
+    try:
+        status = await github_sync_service.refresh_now()
+    except github_sync_service.GithubSyncError as exc:
+        # Surface this as a real failure (not a 200) so the frontend
+        # mutation's onError — not onSuccess — fires, and the UI doesn't
+        # claim data was just synced when it wasn't.
+        raise HTTPException(
+            status_code=502,
+            detail="GitHub sync failed: {}".format("; ".join(exc.errors)),
+        )
     last_synced = status.get("last_synced_at")
     return {
         "in_progress": status.get("in_progress", False),

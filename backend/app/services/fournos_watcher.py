@@ -129,11 +129,6 @@ def _extract_forge_fields(job: dict) -> dict:
 
     job_name = meta.get("name", "")
     phase = status.get("phase", "Unknown")
-    stages = (
-        _compute_terminal_stages(job_name, spec, status)
-        if phase in TERMINAL_PHASES
-        else []
-    )
 
     return {
         "name": job_name,
@@ -147,7 +142,12 @@ def _extract_forge_fields(job: dict) -> dict:
         "created_at": created_at,
         "completed_at": completed_at,
         "duration_seconds": duration_seconds,
-        "stages": stages,
+        # Deliberately *not* set here — see _archive_job, which only
+        # computes/overwrites this on the transition into a terminal phase
+        # (or when nothing's been snapshotted yet), so it's not repeatedly
+        # re-fetched (and potentially clobbered with an empty/Pending-only
+        # result once Tekton resources are gone) on every watch event and
+        # every periodic/full sync pass over an already-terminal job.
         "mlflow_url": mlflow_url,
         "config_overrides": forge.get("configOverrides", {}),
         "fjob_spec": spec,
@@ -172,6 +172,30 @@ async def _archive_job(job: dict) -> None:
         existing = await db_svc.get_job_by_name(session, job_name)
         previous_phase = existing.status if existing else None
         previous_message = existing.message if existing else None
+        existing_stages = existing.stages if existing else None
+
+        phase = fields["status"]
+        if phase in TERMINAL_PHASES:
+            # Only pay for a PipelineRun/TaskRun snapshot on the actual
+            # transition into a terminal phase, or if this job somehow has
+            # no snapshot yet (e.g. it was already terminal the first time
+            # the watcher ever saw it, on startup's initial full sync).
+            # Every later pass over the same already-terminal job — every
+            # subsequent watch MODIFIED event, every 60s full sync — leaves
+            # a populated snapshot alone rather than re-fetching (avoiding
+            # a K8s API call storm) and, since Tekton resources eventually
+            # get pruned, never clobbers good data with an empty/all-
+            # Pending result just because the resources are now gone.
+            transitioning_into_terminal = previous_phase not in TERMINAL_PHASES
+            if transitioning_into_terminal or not existing_stages:
+                new_stages = _compute_terminal_stages(
+                    job_name, fields.get("fjob_spec") or {}, fields.get("fjob_status") or {}
+                )
+                fields["stages"] = new_stages if (new_stages or not existing_stages) else existing_stages
+            else:
+                fields["stages"] = existing_stages
+        # else: job isn't terminal — omit "stages" entirely so upsert_job's
+        # on_conflict update leaves whatever's already stored untouched.
 
         db_job = await db_svc.upsert_job(session, **fields)
 
