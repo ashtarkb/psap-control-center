@@ -144,7 +144,8 @@ def test_failed_tree_refresh_preserves_previous_snapshot(monkeypatch):
 def test_pipeline_refresh_failure_preserves_cached_definitions(monkeypatch):
     previous = {"forge-full": {"name": "forge-full"}}
     monkeypatch.setattr(pipeline_definitions, "_cache", previous)
-    monkeypatch.setattr(pipeline_definitions, "_refresh_inflight", None)
+    monkeypatch.setattr(pipeline_definitions, "_inflight", None)
+    monkeypatch.setattr(pipeline_definitions, "_inflight_is_refresh", False)
 
     def fail_refresh():
         raise RuntimeError("GitHub unavailable")
@@ -157,6 +158,86 @@ def test_pipeline_refresh_failure_preserves_cached_definitions(monkeypatch):
         asyncio.run(pipeline_definitions.refresh_all())
 
     assert pipeline_definitions._cache is previous
+
+
+def test_pipeline_refresh_waits_for_cold_load_before_publishing(monkeypatch):
+    async def scenario():
+        cold_started = asyncio.Event()
+        release_cold = asyncio.Event()
+        calls = []
+        old_definitions = {"old": {"name": "old"}}
+        new_definitions = {"new": {"name": "new"}}
+
+        async def fake_to_thread(_fn, force_refresh):
+            calls.append(force_refresh)
+            if not force_refresh:
+                cold_started.set()
+                await release_cold.wait()
+                pipeline_definitions._cache = old_definitions
+                return old_definitions
+            pipeline_definitions._cache = new_definitions
+            return new_definitions
+
+        monkeypatch.setattr(pipeline_definitions, "_cache", None)
+        monkeypatch.setattr(pipeline_definitions, "_inflight", None)
+        monkeypatch.setattr(pipeline_definitions, "_inflight_is_refresh", False)
+        monkeypatch.setattr(pipeline_definitions.asyncio, "to_thread", fake_to_thread)
+
+        cold_get = asyncio.create_task(pipeline_definitions.get_all())
+        await cold_started.wait()
+        forced_refresh = asyncio.create_task(pipeline_definitions.refresh_all())
+        await asyncio.sleep(0)
+
+        # The refresh must wait instead of starting a second cache writer that
+        # the older cold load could overwrite when it eventually completes.
+        assert calls == [False]
+
+        release_cold.set()
+        cold_result, refresh_result = await asyncio.gather(cold_get, forced_refresh)
+
+        assert calls == [False, True]
+        assert cold_result is old_definitions
+        assert refresh_result is new_definitions
+        assert pipeline_definitions._cache is new_definitions
+
+    asyncio.run(scenario())
+
+
+def test_pipeline_refresh_retries_after_overlapping_cold_load_fails(monkeypatch):
+    async def scenario():
+        cold_started = asyncio.Event()
+        release_cold = asyncio.Event()
+        calls = []
+        new_definitions = {"new": {"name": "new"}}
+
+        async def fake_to_thread(_fn, force_refresh):
+            calls.append(force_refresh)
+            if not force_refresh:
+                cold_started.set()
+                await release_cold.wait()
+                raise RuntimeError("stale snapshot failed")
+            pipeline_definitions._cache = new_definitions
+            return new_definitions
+
+        monkeypatch.setattr(pipeline_definitions, "_cache", None)
+        monkeypatch.setattr(pipeline_definitions, "_inflight", None)
+        monkeypatch.setattr(pipeline_definitions, "_inflight_is_refresh", False)
+        monkeypatch.setattr(pipeline_definitions.asyncio, "to_thread", fake_to_thread)
+
+        cold_get = asyncio.create_task(pipeline_definitions.get_all())
+        await cold_started.wait()
+        forced_refresh = asyncio.create_task(pipeline_definitions.refresh_all())
+        await asyncio.sleep(0)
+        release_cold.set()
+
+        cold_result, refresh_result = await asyncio.gather(cold_get, forced_refresh)
+
+        assert calls == [False, True]
+        assert cold_result == {}
+        assert refresh_result is new_definitions
+        assert pipeline_definitions._cache is new_definitions
+
+    asyncio.run(scenario())
 
 
 def test_ui_schema_refresh_failure_preserves_cached_schema(monkeypatch):

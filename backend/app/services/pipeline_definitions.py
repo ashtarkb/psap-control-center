@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from threading import Lock
 from typing import Dict, Optional
 
 from app.services.github_content import fetch_yaml, list_yamls
@@ -30,7 +31,8 @@ _WORKFLOWS_DIR = "fournos/gitops/base/workflows"
 
 _cache: Optional[Dict[str, dict]] = None
 _inflight: Optional["asyncio.Future[Dict[str, dict]]"] = None
-_refresh_inflight: Optional["asyncio.Future[Dict[str, dict]]"] = None
+_inflight_is_refresh = False
+_cache_load_lock = Lock()
 
 
 def _extract(doc: dict) -> Optional[dict]:
@@ -87,51 +89,103 @@ def load_all_sync() -> Dict[str, dict]:
 
 def get_all_sync() -> Dict[str, dict]:
     """Cached, blocking accessor — loads once, then reuses the cache."""
-    global _cache
-    if _cache is None:
-        _cache = load_all_sync()
-    return _cache
+    try:
+        return _load_and_publish_sync(force_refresh=False)
+    except Exception as exc:
+        logger.warning(
+            "Could not load Forge pipeline definitions in %s: %s",
+            _WORKFLOWS_DIR,
+            exc,
+        )
+        return _cache or {}
 
 
 def get_definition_sync(pipeline_name: str) -> Optional[dict]:
     return get_all_sync().get(pipeline_name)
 
 
-async def _fetch_coalesced() -> Dict[str, dict]:
-    global _inflight
-    if _inflight is not None:
-        return await _inflight
-    _inflight = asyncio.ensure_future(asyncio.to_thread(load_all_sync))
+def _load_and_publish_sync(force_refresh: bool) -> Dict[str, dict]:
+    """Serialize every cache writer, including the watcher's sync accessor.
+
+    A forced refresh always performs a strict load. A cold getter also uses a
+    strict load internally, but its public wrapper retains the existing
+    best-effort fallback. The cache is published only after the complete load
+    succeeds, so a late failed getter can never replace newer definitions.
+    """
+    global _cache
+    with _cache_load_lock:
+        if not force_refresh and _cache is not None:
+            return _cache
+        refreshed = _load_all_strict_sync()
+        _cache = refreshed
+        return refreshed
+
+
+async def _run_load(force_refresh: bool) -> Dict[str, dict]:
+    global _inflight, _inflight_is_refresh
     try:
-        return await _inflight
+        return await asyncio.to_thread(_load_and_publish_sync, force_refresh)
     finally:
         _inflight = None
+        _inflight_is_refresh = False
+
+
+async def _fetch_coalesced(force_refresh: bool) -> Dict[str, dict]:
+    """Coordinate cold reads and explicit refreshes through one operation.
+
+    Readers may join either kind of in-flight load. A forced refresh may join
+    another refresh, but if it arrives during an older cold load it waits for
+    that load and then performs its own fetch against the newly refreshed
+    repository snapshot.
+    """
+    global _inflight, _inflight_is_refresh
+
+    while True:
+        future = _inflight
+        future_is_refresh = _inflight_is_refresh
+        if future is not None:
+            try:
+                result = await asyncio.shield(future)
+            except Exception:
+                # A refresh waiting behind a cold read still owes the caller a
+                # load against the newly published repository snapshot. If the
+                # older read failed, continue and start that forced load rather
+                # than treating the stale attempt as the refresh result.
+                if force_refresh and not future_is_refresh:
+                    continue
+                raise
+            if not force_refresh or future_is_refresh:
+                return result
+            continue
+
+        if not force_refresh and _cache is not None:
+            return _cache
+
+        _inflight_is_refresh = force_refresh
+        future = asyncio.ensure_future(_run_load(force_refresh))
+        _inflight = future
+        return await asyncio.shield(future)
 
 
 async def get_all() -> Dict[str, dict]:
     """Async, cached accessor for the FastAPI layer — never blocks the
     event loop, and concurrent callers share one fetch.
     """
-    global _cache
     if _cache is not None:
         return _cache
-    _cache = await _fetch_coalesced()
-    return _cache
+    try:
+        return await _fetch_coalesced(force_refresh=False)
+    except Exception as exc:
+        logger.warning(
+            "Could not load Forge pipeline definitions in %s: %s",
+            _WORKFLOWS_DIR,
+            exc,
+        )
+        return _cache or {}
 
 
 async def refresh_all() -> Dict[str, dict]:
-    global _cache, _refresh_inflight
-    if _refresh_inflight is not None:
-        return await _refresh_inflight
-
-    future = asyncio.ensure_future(asyncio.to_thread(_load_all_strict_sync))
-    _refresh_inflight = future
-    try:
-        refreshed = await future
-        _cache = refreshed
-        return refreshed
-    finally:
-        _refresh_inflight = None
+    return await _fetch_coalesced(force_refresh=True)
 
 
 async def get_definition(pipeline_name: str) -> Optional[dict]:
