@@ -54,6 +54,7 @@ const STAGE_STYLES: Record<string, { ring: string; chip: string; text: string; i
   Running: { ring: 'ring-blue-200', chip: 'bg-blue-500', text: 'text-blue-700', icon: 'spin' },
   Cancelled: { ring: 'ring-gray-200', chip: 'bg-gray-400', text: 'text-gray-500', icon: 'minus' },
   Skipped: { ring: 'ring-gray-200', chip: 'bg-gray-300', text: 'text-gray-400', icon: 'forward' },
+  NotRun: { ring: 'ring-gray-200', chip: 'bg-gray-300', text: 'text-gray-400', icon: 'minus' },
   Pending: { ring: 'ring-gray-200', chip: 'bg-white border-2 border-gray-300', text: 'text-gray-400', icon: 'none' },
 }
 
@@ -79,7 +80,7 @@ function StageChip({ stage, index }: { stage: PipelineStage; index: number }) {
           {stage.displayName}
         </p>
         <p className={clsx('text-[10px] font-medium uppercase tracking-wide', style.text)}>
-          {stage.status === 'Pending' ? 'queued' : stage.status}
+          {stage.status === 'Pending' ? 'queued' : stage.status === 'NotRun' ? 'not run' : stage.status}
           {stage.startTime && stage.status !== 'Pending' && (
             <span className="ml-1 font-normal normal-case text-gray-400">· {formatDuration(stage.startTime, stage.completionTime)}</span>
           )}

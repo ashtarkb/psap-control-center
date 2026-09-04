@@ -75,6 +75,8 @@ _MIGRATIONS = [
     ("instance_type_rates", "is_estimated", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ("fournos_jobs", "is_lock", "BOOLEAN NOT NULL DEFAULT FALSE"),
     ("fournos_jobs", "stages", "JSONB"),
+    ("fournos_jobs", "stage_snapshot_attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("fournos_jobs", "stage_snapshot_attempted_at", "TIMESTAMP WITH TIME ZONE"),
 ]
 
 

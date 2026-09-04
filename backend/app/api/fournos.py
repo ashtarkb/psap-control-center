@@ -459,21 +459,20 @@ async def get_job(job_name: str):
         fjob.get("status", {}).get("message", "")
     )
     stages = db_job.stages or []
-    # The step a terminal job's status.message points at is whichever
-    # stage didn't end in Succeeded/Skipped/Cancelled — for a Failed job
-    # that's the one that actually broke the run; surfaced the same way
-    # the live view highlights its "current" step.
-    current_step = next(
-        (
-            {
-                "name": s["name"],
-                "displayName": s.get("displayName", s["name"]),
-                "startTime": s.get("startTime"),
-            }
-            for s in stages
-            if s.get("status") not in ("Succeeded", "Skipped", "Cancelled")
-        ),
-        None,
+    # A terminal job has no live "current" step. For a failed job, retain the
+    # useful pointer to the concrete TaskRun that failed, but never promote a
+    # queued/not-run placeholder to current work.
+    failed_stage = next(
+        (s for s in stages if s.get("status") == "Failed"), None
+    ) if db_job.status == "Failed" else None
+    current_step = (
+        {
+            "name": failed_stage["name"],
+            "displayName": failed_stage.get("displayName", failed_stage["name"]),
+            "startTime": failed_stage.get("startTime"),
+        }
+        if failed_stage
+        else None
     )
 
     return {
