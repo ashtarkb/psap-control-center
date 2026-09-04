@@ -6,6 +6,7 @@ import asyncio
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from dateutil.parser import parse as parse_dt
@@ -24,6 +25,8 @@ _watcher_session: Optional[async_sessionmaker] = None
 
 SYNC_INTERVAL_SECONDS = 60
 TERMINAL_PHASES = {"Succeeded", "Failed", "Stopped"}
+STAGE_SNAPSHOT_MAX_ATTEMPTS = 3
+STAGE_SNAPSHOT_RETRY_SECONDS = 60
 
 
 def _init_watcher_db(loop: asyncio.AbstractEventLoop) -> None:
@@ -41,12 +44,13 @@ def _init_watcher_db(loop: asyncio.AbstractEventLoop) -> None:
     )
 
 
-def _compute_terminal_stages(job_name: str, spec: dict, status: dict) -> list:
-    """Snapshot the merged pipeline stage list for a job that just reached
-    a terminal phase — this is the *last* moment the PipelineRun/TaskRuns
-    are guaranteed to still exist in the cluster, so it's the only chance
-    to capture "which step failed" before the job (and its resources) get
-    cleaned up and it becomes a plain history row.
+def _compute_terminal_stages(
+    job_name: str, spec: dict, status: dict
+) -> Optional[list]:
+    """Snapshot the merged pipeline stage list for a terminal job.
+
+    This runs on the transition and, if the K8s view is incomplete, through a
+    short bounded retry window before the PipelineRun/TaskRuns are cleaned up.
     """
     try:
         pr_name = status.get("pipelineRun", "")
@@ -54,18 +58,63 @@ def _compute_terminal_stages(job_name: str, spec: dict, status: dict) -> list:
         if not pr:
             prs = k8s_client.list_pipelineruns_for_job(job_name)
             pr = prs[0] if prs else None
-        stages = k8s_client.extract_pipeline_stages(pr) if pr else []
+        if not pr:
+            return None
+
+        actual_stages = k8s_client.extract_pipeline_stages(pr)
+        # A terminal PipelineRun should not have active/unknown TaskRuns. An
+        # empty or Pending/Running result means the K8s snapshot was incomplete
+        # (usually a transient lookup failure), so leave the DB value untouched
+        # and let the bounded retry path try again.
+        if not actual_stages or any(
+            stage.get("status") in ("Pending", "Running")
+            for stage in actual_stages
+        ):
+            return None
 
         pipeline_name = spec.get("pipeline", "")
         if pipeline_name:
             pipeline_def = pipeline_definitions.get_definition_sync(pipeline_name)
-            stages = pipeline_definitions.merge_pipeline_stages(pipeline_def, stages)
-        return stages
+            actual_stages = pipeline_definitions.merge_pipeline_stages(
+                pipeline_def, actual_stages
+            )
+
+        # Tasks with no TaskRun after the PipelineRun has terminated are no
+        # longer queued. Keep that distinct from Tekton's explicit `Skipped`
+        # status while ensuring History never presents terminal work as active.
+        return [
+            {**stage, "status": "NotRun"}
+            if stage.get("status") == "Pending"
+            else stage
+            for stage in actual_stages
+        ]
     except Exception as exc:
         logger.warning(
             "Could not snapshot pipeline stages for %s: %s", job_name, exc
         )
-        return []
+        return None
+
+
+def _has_usable_stage_snapshot(stages: Optional[list]) -> bool:
+    return bool(stages) and all(
+        isinstance(stage, dict)
+        and stage.get("status") not in (None, "Pending", "Running")
+        for stage in stages
+    )
+
+
+def _stage_snapshot_retry_due(
+    attempts: int,
+    attempted_at: Optional[datetime],
+    now: datetime,
+) -> bool:
+    if attempts >= STAGE_SNAPSHOT_MAX_ATTEMPTS:
+        return False
+    if attempted_at is None:
+        return True
+    if attempted_at.tzinfo is None:
+        attempted_at = attempted_at.replace(tzinfo=timezone.utc)
+    return (now - attempted_at).total_seconds() >= STAGE_SNAPSHOT_RETRY_SECONDS
 
 
 def _extract_forge_fields(job: dict) -> dict:
@@ -142,12 +191,9 @@ def _extract_forge_fields(job: dict) -> dict:
         "created_at": created_at,
         "completed_at": completed_at,
         "duration_seconds": duration_seconds,
-        # Deliberately *not* set here — see _archive_job, which only
-        # computes/overwrites this on the transition into a terminal phase
-        # (or when nothing's been snapshotted yet), so it's not repeatedly
-        # re-fetched (and potentially clobbered with an empty/Pending-only
-        # result once Tekton resources are gone) on every watch event and
-        # every periodic/full sync pass over an already-terminal job.
+        # Deliberately *not* set here — see _archive_job, which owns the
+        # bounded terminal-snapshot retry state and never replaces good data
+        # with an incomplete K8s response.
         "mlflow_url": mlflow_url,
         "config_overrides": forge.get("configOverrides", {}),
         "fjob_spec": spec,
@@ -173,30 +219,34 @@ async def _archive_job(job: dict) -> None:
         previous_phase = existing.status if existing else None
         previous_message = existing.message if existing else None
         existing_stages = existing.stages if existing else None
+        snapshot_attempts = existing.stage_snapshot_attempts if existing else 0
+        snapshot_attempted_at = (
+            existing.stage_snapshot_attempted_at if existing else None
+        )
 
         phase = fields["status"]
         if phase in TERMINAL_PHASES:
-            # Only pay for a PipelineRun/TaskRun snapshot on the actual
-            # transition into a terminal phase, or if this job somehow has
-            # no snapshot yet (e.g. it was already terminal the first time
-            # the watcher ever saw it, on startup's initial full sync).
-            # Every later pass over the same already-terminal job — every
-            # subsequent watch MODIFIED event, every 60s full sync — leaves
-            # a populated snapshot alone rather than re-fetching (avoiding
-            # a K8s API call storm) and, since Tekton resources eventually
-            # get pruned, never clobbers good data with an empty/all-
-            # Pending result just because the resources are now gone.
             transitioning_into_terminal = previous_phase not in TERMINAL_PHASES
-            # NULL means a legacy row has never been backfilled. An empty
-            # list means snapshotting was attempted but no Tekton data was
-            # available; do not retry that job on every 60-second full sync.
-            if transitioning_into_terminal or existing_stages is None:
+            now = datetime.now(timezone.utc)
+            snapshot_complete = _has_usable_stage_snapshot(existing_stages)
+            retry_due = _stage_snapshot_retry_due(
+                snapshot_attempts or 0, snapshot_attempted_at, now
+            )
+            within_retry_budget = (
+                snapshot_attempts or 0
+            ) < STAGE_SNAPSHOT_MAX_ATTEMPTS
+            if (
+                not snapshot_complete
+                and within_retry_budget
+                and (transitioning_into_terminal or retry_due)
+            ):
                 new_stages = _compute_terminal_stages(
                     job_name, fields.get("fjob_spec") or {}, fields.get("fjob_status") or {}
                 )
-                fields["stages"] = new_stages
-            else:
-                fields["stages"] = existing_stages
+                fields["stage_snapshot_attempts"] = (snapshot_attempts or 0) + 1
+                fields["stage_snapshot_attempted_at"] = now
+                if new_stages is not None:
+                    fields["stages"] = new_stages
         # else: job isn't terminal — omit "stages" entirely so upsert_job's
         # on_conflict update leaves whatever's already stored untouched.
 
@@ -270,7 +320,7 @@ def _run_watch_loop(loop: asyncio.AbstractEventLoop) -> None:
                 resource_version or "latest",
             )
             for event in k8s_client.watch_fournos_jobs(
-                resource_version=resource_version, timeout=300
+                resource_version=resource_version, timeout=SYNC_INTERVAL_SECONDS
             ):
                 obj = event.get("object", {})
                 rv = obj.get("metadata", {}).get("resourceVersion", "")
@@ -301,6 +351,17 @@ def _run_watch_loop(loop: asyncio.AbstractEventLoop) -> None:
                     except Exception as exc:
                         logger.warning("Periodic sync failed: %s", exc)
                     last_sync = time.monotonic()
+
+            # A quiet cluster produces no events, so the in-loop timer above
+            # never fires. The watch server closes the stream at the timeout;
+            # use that boundary to keep full syncs (including bounded stage-
+            # snapshot retries) running once per interval even when idle.
+            if time.monotonic() - last_sync >= SYNC_INTERVAL_SECONDS:
+                try:
+                    loop.run_until_complete(_full_sync())
+                except Exception as exc:
+                    logger.warning("Periodic sync failed: %s", exc)
+                last_sync = time.monotonic()
 
         except Exception as exc:
             reason = str(exc)
